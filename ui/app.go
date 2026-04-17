@@ -138,7 +138,7 @@ func NewApp() tea.Model {
 }
 
 func (m *appModel) Init() tea.Cmd {
-	return waitForRunnerEvent(m.runner)
+	return tea.Batch(waitForRunnerEvent(m.runner), m.welcome.Init())
 }
 
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -306,6 +306,34 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
+		switch m.screen {
+		case screenWelcome:
+			var cmd tea.Cmd
+			m.welcome, cmd = m.welcome.Update(msg)
+			return m, cmd
+		case screenPicker:
+			var cmd tea.Cmd
+			m.picker, cmd = m.picker.Update(msg)
+			return m, cmd
+		case screenNewFile:
+			var cmd tea.Cmd
+			m.newFile, cmd = m.newFile.Update(msg)
+			return m, cmd
+		case screenInterpreterPicker:
+			var cmd tea.Cmd
+			m.interpreterPicker, cmd = m.interpreterPicker.Update(msg)
+			return m, cmd
+		case screenModelPicker:
+			var cmd tea.Cmd
+			m.modelPicker, cmd = m.modelPicker.Update(msg)
+			return m, cmd
+		case screenEditor:
+			if m.hasActiveTab() {
+				var cmd tea.Cmd
+				m.tabs[m.activeTab].editor, cmd = m.tabs[m.activeTab].editor.Update(msg)
+				return m, cmd
+			}
+		}
 		return m, nil
 	}
 
