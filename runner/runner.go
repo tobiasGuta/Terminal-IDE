@@ -385,6 +385,9 @@ def traced_input(prompt=""):
     emit("resumed", CURRENT_LINE)
     return value
 
+def emit_final(event_type, line=None):
+    emit(event_type, line if line is not None else CURRENT_LINE)
+
 if hasattr(_builtins, "raw_input"):
     _builtins.raw_input = traced_input
 _builtins.input = traced_input
@@ -401,8 +404,22 @@ globals_dict = {
 }
 
 sys.settrace(trace_calls)
-code = compile(source, ORIGINAL_PATH, "exec", 0, True)
-exec(code, globals_dict)
+try:
+    code = compile(source, ORIGINAL_PATH, "exec", 0, True)
+except BaseException as err:
+    emit_final("exception", getattr(err, "lineno", CURRENT_LINE))
+    raise
+
+try:
+    exec(code, globals_dict)
+except SystemExit:
+    emit_final("finished")
+    raise
+except BaseException:
+    emit_final("exception")
+    raise
+else:
+    emit_final("finished")
 `
 
 func detectPythonInterpreter(ctx context.Context, path string) (string, error) {

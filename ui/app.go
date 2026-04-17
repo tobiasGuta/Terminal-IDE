@@ -133,6 +133,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tabs[idx].status = fmt.Sprintf("Waiting for input on line %d", msg.Line)
 			case "line", "resumed":
 				m.tabs[idx].status = fmt.Sprintf("Executing line %d", msg.Line)
+			case "finished":
+				m.tabs[idx].status = fmt.Sprintf("Finished on line %d", msg.Line)
+			case "exception":
+				m.tabs[idx].status = fmt.Sprintf("Stopped on line %d", msg.Line)
 			}
 		}
 		return m, waitForRunnerEvent(m.runner)
@@ -140,22 +144,31 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runner.FinishedMsg:
 		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
 			m.tabs[idx].activeRunID = 0
-			m.tabs[idx].editor.ClearExecution()
 			if idx == m.activeTab {
 				m.tabs[idx].output.SetInputFocus(false)
 				m.focus = "editor"
 			}
+			finalLine := m.tabs[idx].editor.ExecutionLine()
 			switch {
 			case msg.Cancelled:
+				m.tabs[idx].editor.ClearExecution()
 				m.tabs[idx].output.SetStatus("Run cancelled")
 				m.tabs[idx].status = "Run cancelled"
 			case msg.Err != nil:
 				m.tabs[idx].output.SetStatus("Run finished with errors")
 				m.tabs[idx].output.Append(msg.Err.Error(), true)
-				m.tabs[idx].status = "Run finished with errors"
+				if finalLine > 0 {
+					m.tabs[idx].status = fmt.Sprintf("Run stopped on line %d", finalLine)
+				} else {
+					m.tabs[idx].status = "Run finished with errors"
+				}
 			default:
 				m.tabs[idx].output.SetStatus("Run finished successfully")
-				m.tabs[idx].status = "Run finished successfully"
+				if finalLine > 0 {
+					m.tabs[idx].status = fmt.Sprintf("Run finished on line %d", finalLine)
+				} else {
+					m.tabs[idx].status = "Run finished successfully"
+				}
 			}
 		}
 		return m, waitForRunnerEvent(m.runner)
@@ -216,6 +229,18 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
+	}
+
+	if key.Paste && m.screen == screenEditor && m.hasActiveTab() {
+		text := string(key.Runes)
+		if m.tabs[m.activeTab].output.InputFocused() {
+			m.tabs[m.activeTab].output.PasteInput(text)
+			m.tabs[m.activeTab].status = "Pasted into live input"
+			return m, nil
+		}
+		m.tabs[m.activeTab].editor.PasteText(text)
+		m.tabs[m.activeTab].status = "Pasted into editor"
+		return m, scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
 	}
 
 	if m.screen == screenEditor && m.hasActiveTab() && m.tabs[m.activeTab].output.InputFocused() {

@@ -207,6 +207,10 @@ func (m *Model) SetExecution(line int, waiting bool) {
 	}
 }
 
+func (m Model) ExecutionLine() int {
+	return m.execLine
+}
+
 func (m *Model) ClearExecution() {
 	m.execLine = 0
 	m.execWaiting = false
