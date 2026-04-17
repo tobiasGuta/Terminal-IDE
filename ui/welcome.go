@@ -7,6 +7,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const welcomeASCIIArt = `████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗         ██╗██████╗ ███████╗
+╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║        ██╔╝██╔══██╗██╔════╝
+   ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║       ██╔╝ ██║  ██║█████╗
+   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║      ██╔╝  ██║  ██║██╔══╝
+   ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗██╔╝   ██████╔╝███████╗
+   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝    ╚═════╝ ╚══════╝
+─────────────────────── go · python · ai-powered ───────────────────────`
+
 type welcomeModel struct {
 	index   int
 	options []string
@@ -68,11 +76,9 @@ func (m welcomeModel) View() string {
 		items = append(items, style.Render(option))
 	}
 
-	logo := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Render("Terminal IDE")
-	tagline := mutedStyle.Render("Bubble Tea + Lip Gloss + Chroma")
+	logo := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14")).Render(welcomeASCIIArt)
 	body := lipgloss.JoinVertical(lipgloss.Center,
 		logo,
-		tagline,
 		"",
 		strings.Join(items, "\n"),
 		"",
