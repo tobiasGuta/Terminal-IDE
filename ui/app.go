@@ -84,6 +84,8 @@ type editorLayout struct {
 	contentX     int
 }
 
+const editorChromeRows = 4
+
 type appModel struct {
 	screen       screen
 	prevScreen   screen
@@ -645,6 +647,9 @@ func (m *appModel) View() string {
 		tab := m.tabs[m.activeTab]
 		panelWidth := max(20, m.width-4)
 		headerWidth := max(10, panelWidth-4)
+		editorBodyHeight := max(3, m.editorHeight-editorChromeRows)
+		tab.editor.SetSize(max(10, m.width-8), editorBodyHeight)
+		tab.output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
 		tabBar := lipgloss.NewStyle().
 			Width(headerWidth).
 			BorderBottom(true).
@@ -662,7 +667,7 @@ func (m *appModel) View() string {
 			panelX:       appPaddingStyle.GetHorizontalFrameSize() / 2,
 			panelY:       appPaddingStyle.GetVerticalFrameSize() / 2,
 			panelWidth:   panelWidth,
-			topHeight:    max(4, m.editorHeight) + activePanelStyle.GetVerticalFrameSize(),
+			topHeight:    lipgloss.Height(tabBar) + lipgloss.Height(header) + editorBodyHeight + activePanelStyle.GetVerticalFrameSize(),
 			bottomHeight: max(3, m.outputHeight) + panelStyle.GetVerticalFrameSize(),
 			tabBarY:      appPaddingStyle.GetVerticalFrameSize() / 2,
 			tabBarX:      appPaddingStyle.GetHorizontalFrameSize()/2 + activePanelStyle.GetHorizontalFrameSize()/2,
@@ -671,7 +676,7 @@ func (m *appModel) View() string {
 		m.layout.editorBodyY = m.layout.panelY + lipgloss.Height(tabBar) + lipgloss.Height(header) + activePanelStyle.GetVerticalFrameSize()/2 - 1
 		m.layout.contentX = m.layout.tabBarX
 
-		top := activePanelStyle.Width(panelWidth).Height(max(4, m.editorHeight)).Render(
+		top := activePanelStyle.Width(panelWidth).Height(lipgloss.Height(tabBar) + lipgloss.Height(header) + editorBodyHeight).Render(
 			lipgloss.JoinVertical(lipgloss.Left, tabBar, header, tab.editor.View()),
 		)
 		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
@@ -701,7 +706,7 @@ func (m *appModel) resize() {
 	m.interpreterPicker.SetSize(m.width, m.height)
 	m.modelPicker.SetSize(m.width, m.height)
 	for i := range m.tabs {
-		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-2))
+		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-editorChromeRows))
 		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
 	}
 }
@@ -729,7 +734,7 @@ func (m *appModel) openFile(path string) (int, error) {
 	}
 	m.nextTabID++
 	tab.editor.LoadFile(path, string(content))
-	tab.editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-2))
+	tab.editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-editorChromeRows))
 	tab.output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
 
 	m.tabs = append(m.tabs, tab)
@@ -803,22 +808,25 @@ func (m *appModel) renderTabBar(width int) string {
 		return ""
 	}
 
-	var rendered []string
+	rendered := make([]string, 0, len(m.tabs)+1)
+	rendered = append(rendered, accentStyle.Render(fmt.Sprintf("Tabs %d:", len(m.tabs))))
 	for i, item := range m.tabItems() {
-		style := lipgloss.NewStyle().
-			Padding(0, 1).
-			MarginRight(1).
-			Foreground(lipgloss.Color("252")).
-			Background(lipgloss.Color("236"))
+		label := item.label
 		if i == m.activeTab {
-			style = style.Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15")).Bold(true)
+			label = accentStyle.Render("[" + label + "]")
+		} else {
+			label = mutedStyle.Render(label)
 		}
-		rendered = append(rendered, style.Render(item.label))
+		rendered = append(rendered, label)
 	}
 
-	bar := lipgloss.JoinHorizontal(lipgloss.Left, rendered...)
+	bar := strings.Join(rendered, "  ")
 	if lipgloss.Width(bar) > width {
-		bar = lipgloss.NewStyle().MaxWidth(width).Render(bar)
+		activeLabel := m.tabItems()[m.activeTab].label
+		bar = fmt.Sprintf("Tabs %d: [%s]", len(m.tabs), activeLabel)
+		if lipgloss.Width(bar) > width {
+			bar = truncateLabel(bar, max(1, width))
+		}
 	}
 	return bar
 }
@@ -987,12 +995,12 @@ func (m *appModel) currentEditorLayout() editorLayout {
 		panelX:       appPaddingStyle.GetHorizontalFrameSize() / 2,
 		panelY:       appPaddingStyle.GetVerticalFrameSize() / 2,
 		panelWidth:   max(20, m.width-4),
-		topHeight:    max(4, m.editorHeight) + activePanelStyle.GetVerticalFrameSize(),
-		bottomY:      appPaddingStyle.GetVerticalFrameSize()/2 + max(4, m.editorHeight) + activePanelStyle.GetVerticalFrameSize(),
+		topHeight:    max(3, m.editorHeight-editorChromeRows) + editorChromeRows + activePanelStyle.GetVerticalFrameSize(),
+		bottomY:      appPaddingStyle.GetVerticalFrameSize()/2 + max(3, m.editorHeight-editorChromeRows) + editorChromeRows + activePanelStyle.GetVerticalFrameSize(),
 		bottomHeight: max(3, m.outputHeight) + panelStyle.GetVerticalFrameSize(),
 		tabBarY:      appPaddingStyle.GetVerticalFrameSize() / 2,
 		tabBarX:      appPaddingStyle.GetHorizontalFrameSize()/2 + activePanelStyle.GetHorizontalFrameSize()/2,
-		editorBodyY:  appPaddingStyle.GetVerticalFrameSize()/2 + 3,
+		editorBodyY:  appPaddingStyle.GetVerticalFrameSize()/2 + editorChromeRows - 1,
 		contentX:     appPaddingStyle.GetHorizontalFrameSize()/2 + activePanelStyle.GetHorizontalFrameSize()/2,
 	}
 }
