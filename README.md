@@ -8,6 +8,7 @@ A terminal-based IDE written in Go using Bubble Tea, Lip Gloss, and Chroma.
 - Welcome screen action to create a new file by entering a name and extension
 - Multiple open files with tabs
 - Split editor and live output layout
+- Python visual execution tracking with a live execution pointer in the editor
 - Custom code editor with:
   - line numbers
   - basic cursor movement
@@ -15,17 +16,20 @@ A terminal-based IDE written in Go using Bubble Tea, Lip Gloss, and Chroma.
 - Debounced live execution for `.py` and `.go` files
 - Real-time stdout/stderr streaming into the lower pane
 - Live stdin input for programs that prompt with `input()` or `raw_input()`
-- Clipboard copy/paste for the current editor line or live input
+- Clipboard copy/paste for the editor, live input, and selected live output text
 - Mouse click support for focusing the editor or output pane
+- Mouse drag selection in the live output pane
+- Manual Python interpreter override per tab, alongside auto-detection
 - Keyboard shortcuts:
   - `Ctrl+S` save
   - `Ctrl+O` open file picker
   - `Ctrl+W` close current tab
   - `Shift+Tab` previous tab
   - `Tab` or `Ctrl+]` next tab
-  - `Ctrl+C` copy current editor line or input buffer
+  - `Ctrl+C` copy selected live output text, or else the current editor line/input buffer
   - `Ctrl+V` paste clipboard into the editor or live input
   - `Ctrl+L` focus live input
+  - `Ctrl+R` open the Python interpreter selector for the current Python tab
   - `Ctrl+E` return focus to the editor
   - `Esc` return to welcome menu
   - `Ctrl+Q` quit
@@ -47,11 +51,14 @@ go run ./cmd/ide
 
 - Python syntax highlighting is included through Chroma.
 - Live execution currently supports `.py` and `.go` files.
-- `Ctrl+C` currently copies the current editor line or live input buffer, not a text selection.
+- `Ctrl+C` copies selected text from the live output when a selection is active.
+- Editor copy still uses the current line rather than an arbitrary in-editor text selection.
 - Python files try to pick the right interpreter automatically:
   - explicit shebangs like `#!/usr/bin/env python2` are respected
   - otherwise the app probes available Python interpreters and falls back to syntax hints
+- Python tabs can override `auto` mode by opening a selector with `Ctrl+R` and choosing from detected installed interpreters.
 - Python files are launched in unbuffered mode so prompts from `input()` and `raw_input()` show immediately.
+- Python runs emit live execution-line events, so the editor can highlight the current line and pause on blocking input.
 - `Open Folder` lets you choose a directory first, then browse files inside it.
 
 ## Screenshots

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,16 @@ type OutputMsg struct {
 
 func (m OutputMsg) Sequence() int { return m.ID }
 
+type ExecutionMsg struct {
+	ID      int
+	File    string
+	Line    int
+	State   string
+	Waiting bool
+}
+
+func (m ExecutionMsg) Sequence() int { return m.ID }
+
 type FinishedMsg struct {
 	ID        int
 	Err       error
@@ -46,6 +57,19 @@ type Manager struct {
 	events chan Event
 }
 
+const executionEventPrefix = "__TUI_EVT__"
+
+type RunOptions struct {
+	PythonInterpreter string
+}
+
+type PythonInterpreter struct {
+	Command string
+	Path    string
+	Version string
+	Major   int
+}
+
 func New() *Manager {
 	return &Manager{
 		events: make(chan Event, 256),
@@ -56,7 +80,7 @@ func (m *Manager) Events() <-chan Event {
 	return m.events
 }
 
-func (m *Manager) Start(path, content string) int {
+func (m *Manager) Start(path, content string, opts RunOptions) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -73,7 +97,7 @@ func (m *Manager) Start(path, content string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	go m.run(ctx, id, path, content)
+	go m.run(ctx, id, path, content, opts)
 	return id
 }
 
@@ -116,7 +140,7 @@ func (m *Manager) SendInput(id int, input string) error {
 	return err
 }
 
-func (m *Manager) run(ctx context.Context, id int, path, content string) {
+func (m *Manager) run(ctx context.Context, id int, path, content string, opts RunOptions) {
 	m.events <- StartedMsg{ID: id}
 
 	dir, err := os.MkdirTemp("", "terminal-ide-run-*")
@@ -137,12 +161,14 @@ func (m *Manager) run(ctx context.Context, id int, path, content string) {
 		return
 	}
 
-	cmd, err := commandForPath(ctx, tempPath)
+	cmd, err := commandForPath(ctx, path, tempPath, dir, opts)
 	if err != nil {
 		m.events <- FinishedMsg{ID: id, Err: err}
 		return
 	}
-	cmd.Dir = dir
+	if cmd.Dir == "" {
+		cmd.Dir = dir
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -169,7 +195,7 @@ func (m *Manager) run(ctx context.Context, id int, path, content string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go m.stream(id, stdout, false, &wg)
-	go m.stream(id, stderr, true, &wg)
+	go m.streamStderr(id, stderr, &wg)
 	wg.Wait()
 	m.clearStdin(id)
 
@@ -202,6 +228,65 @@ func (m *Manager) stream(id int, reader io.Reader, isErr bool, wg *sync.WaitGrou
 	}
 }
 
+func (m *Manager) streamStderr(id int, reader io.Reader, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	buf := make([]byte, 256)
+	var pending strings.Builder
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			pending.Write(buf[:n])
+			m.flushStderrBuffer(id, &pending, err == io.EOF)
+		}
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "file already closed") {
+				m.events <- OutputMsg{ID: id, Text: err.Error() + "\n", IsErr: true}
+			}
+			return
+		}
+	}
+}
+
+func (m *Manager) flushStderrBuffer(id int, pending *strings.Builder, flushRemainder bool) {
+	for {
+		data := pending.String()
+		idx := strings.IndexByte(data, '\n')
+		if idx == -1 {
+			if flushRemainder && data != "" {
+				m.events <- OutputMsg{ID: id, Text: data, IsErr: true}
+				pending.Reset()
+			}
+			return
+		}
+
+		line := data[:idx]
+		rest := data[idx+1:]
+		pending.Reset()
+		pending.WriteString(rest)
+
+		if strings.HasPrefix(line, executionEventPrefix) {
+			payload := strings.TrimPrefix(line, executionEventPrefix)
+			var trace tracedEvent
+			if err := json.Unmarshal([]byte(payload), &trace); err == nil {
+				m.events <- ExecutionMsg{
+					ID:      id,
+					File:    trace.File,
+					Line:    trace.Line,
+					State:   trace.Type,
+					Waiting: trace.Type == "waiting_input",
+				}
+				continue
+			}
+		}
+
+		m.events <- OutputMsg{ID: id, Text: line + "\n", IsErr: true}
+	}
+}
+
 func (m *Manager) setStdin(id int, stdin io.WriteCloser) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -221,22 +306,104 @@ func (m *Manager) clearStdin(id int) {
 	}
 }
 
-func commandForPath(ctx context.Context, path string) (*exec.Cmd, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
+func commandForPath(ctx context.Context, originalPath, tempPath, tempDir string, opts RunOptions) (*exec.Cmd, error) {
+	switch strings.ToLower(filepath.Ext(originalPath)) {
 	case ".py":
-		interpreter, err := detectPythonInterpreter(ctx, path)
+		interpreter := opts.PythonInterpreter
+		var err error
+		if interpreter == "" {
+			interpreter, err = detectPythonInterpreter(ctx, tempPath)
+		} else if _, err = exec.LookPath(interpreter); err != nil {
+			if _, statErr := os.Stat(interpreter); statErr != nil {
+				return nil, fmt.Errorf("selected interpreter %q is not available", interpreter)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
-		cmd := exec.CommandContext(ctx, interpreter, "-u", path)
+		bootstrapPath := filepath.Join(tempDir, "__terminal_ide_trace__.py")
+		if err := os.WriteFile(bootstrapPath, []byte(pythonTraceBootstrap), 0o644); err != nil {
+			return nil, err
+		}
+		cmd := exec.CommandContext(ctx, interpreter, "-u", bootstrapPath, tempPath, originalPath)
 		cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+		cmd.Dir = filepath.Dir(originalPath)
 		return cmd, nil
 	case ".go":
-		return exec.CommandContext(ctx, "go", "run", path), nil
+		cmd := exec.CommandContext(ctx, "go", "run", tempPath)
+		cmd.Dir = filepath.Dir(originalPath)
+		return cmd, nil
 	default:
 		return nil, fmt.Errorf("live run supports .py and .go files right now")
 	}
 }
+
+type tracedEvent struct {
+	Type string `json:"type"`
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
+const pythonTraceBootstrap = `
+import json
+import os
+import sys
+
+TEMP_SOURCE_PATH = sys.argv[1]
+ORIGINAL_PATH = sys.argv[2]
+CURRENT_LINE = 0
+EVENT_PREFIX = "__TUI_EVT__"
+
+try:
+    import __builtin__ as _builtins
+except ImportError:
+    import builtins as _builtins
+
+REAL_INPUT = getattr(_builtins, "raw_input", None)
+if REAL_INPUT is None:
+    REAL_INPUT = _builtins.input
+
+def emit(event_type, line):
+    payload = {
+        "type": event_type,
+        "file": ORIGINAL_PATH,
+        "line": line or 0,
+    }
+    sys.stderr.write(EVENT_PREFIX + json.dumps(payload) + "\n")
+    sys.stderr.flush()
+
+def trace_calls(frame, event, arg):
+    global CURRENT_LINE
+    if event == "line" and frame.f_code.co_filename == ORIGINAL_PATH:
+        CURRENT_LINE = frame.f_lineno
+        emit("line", CURRENT_LINE)
+    return trace_calls
+
+def traced_input(prompt=""):
+    emit("waiting_input", CURRENT_LINE)
+    value = REAL_INPUT(prompt)
+    emit("resumed", CURRENT_LINE)
+    return value
+
+if hasattr(_builtins, "raw_input"):
+    _builtins.raw_input = traced_input
+_builtins.input = traced_input
+
+with open(TEMP_SOURCE_PATH, "rb") as handle:
+    source = handle.read()
+
+sys.argv = [ORIGINAL_PATH]
+sys.path[0] = os.path.dirname(ORIGINAL_PATH)
+globals_dict = {
+    "__name__": "__main__",
+    "__file__": ORIGINAL_PATH,
+    "__package__": None,
+}
+
+sys.settrace(trace_calls)
+code = compile(source, ORIGINAL_PATH, "exec", 0, True)
+exec(code, globals_dict)
+`
 
 func detectPythonInterpreter(ctx context.Context, path string) (string, error) {
 	sourceBytes, err := os.ReadFile(path)
@@ -259,11 +426,10 @@ func detectPythonInterpreter(ctx context.Context, path string) (string, error) {
 	var py3Candidates []string
 	var py2Candidates []string
 	for _, interpreter := range available {
-		if strings.Contains(interpreter, "python2") {
+		switch pythonMajorVersion(interpreter) {
+		case 2:
 			py2Candidates = append(py2Candidates, interpreter)
-			continue
-		}
-		if strings.Contains(interpreter, "python3") || interpreter == "python" {
+		case 3:
 			py3Candidates = append(py3Candidates, interpreter)
 		}
 	}
@@ -283,14 +449,46 @@ func detectPythonInterpreter(ctx context.Context, path string) (string, error) {
 }
 
 func availablePythonInterpreters() []string {
-	candidates := []string{"python3", "python", "python2"}
-	var available []string
-	for _, name := range candidates {
-		if _, err := exec.LookPath(name); err == nil {
-			available = append(available, name)
-		}
+	interpreters, _ := DiscoverPythonInterpreters()
+	var commands []string
+	for _, item := range interpreters {
+		commands = append(commands, item.Path)
 	}
-	return available
+	return commands
+}
+
+func DiscoverPythonInterpreters() ([]PythonInterpreter, error) {
+	candidates := []string{
+		"python3",
+		"python3.12",
+		"python3.11",
+		"python3.10",
+		"python3.9",
+		"python3.8",
+		"python",
+		"python2",
+		"python2.7",
+	}
+	seen := make(map[string]bool)
+	var available []PythonInterpreter
+	for _, name := range candidates {
+		path, err := exec.LookPath(name)
+		if err != nil || seen[path] {
+			continue
+		}
+		seen[path] = true
+		major, version := pythonVersionDetails(name)
+		if major == 0 {
+			continue
+		}
+		available = append(available, PythonInterpreter{
+			Command: name,
+			Path:    path,
+			Version: version,
+			Major:   major,
+		})
+	}
+	return available, nil
 }
 
 func interpreterFromShebang(source string) string {
@@ -306,10 +504,66 @@ func interpreterFromShebang(source string) string {
 	}
 
 	if strings.HasSuffix(fields[0], "env") && len(fields) > 1 {
-		return fields[1]
+		return resolvePythonAlias(fields[1])
 	}
 
-	return filepath.Base(fields[0])
+	return resolvePythonAlias(filepath.Base(fields[0]))
+}
+
+func resolvePythonAlias(name string) string {
+	if _, err := exec.LookPath(name); err == nil {
+		return name
+	}
+
+	switch {
+	case strings.HasPrefix(name, "python2."):
+		if _, err := exec.LookPath("python2"); err == nil {
+			return "python2"
+		}
+	case strings.HasPrefix(name, "python3."):
+		if _, err := exec.LookPath("python3"); err == nil {
+			return "python3"
+		}
+	}
+
+	return name
+}
+
+func pythonMajorVersion(interpreter string) int {
+	major, _ := pythonVersionDetails(interpreter)
+	return major
+}
+
+func pythonVersionDetails(interpreter string) (int, string) {
+	cmd := exec.Command(interpreter, "-c", "import sys; print(sys.version_info[0])")
+	output, err := cmd.Output()
+	if err != nil {
+		switch {
+		case strings.Contains(interpreter, "python2"):
+			return 2, ""
+		case strings.Contains(interpreter, "python3"):
+			return 3, ""
+		default:
+			return 0, ""
+		}
+	}
+
+	major := 0
+	switch strings.TrimSpace(string(output)) {
+	case "2":
+		major = 2
+	case "3":
+		major = 3
+	default:
+		return 0, ""
+	}
+
+	versionCmd := exec.Command(interpreter, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+	versionOutput, err := versionCmd.Output()
+	if err != nil {
+		return major, ""
+	}
+	return major, strings.TrimSpace(string(versionOutput))
 }
 
 func pickByCompilationProbe(ctx context.Context, path string, py3Candidates, py2Candidates []string) string {

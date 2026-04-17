@@ -13,15 +13,22 @@ import (
 type ChangedMsg struct{}
 
 type Model struct {
-	path      string
-	lines     []string
-	cursorRow int
-	cursorCol int
-	rowOffset int
-	colOffset int
-	width     int
-	height    int
-	dirty     bool
+	path        string
+	lines       []string
+	cursorRow   int
+	cursorCol   int
+	rowOffset   int
+	colOffset   int
+	width       int
+	height      int
+	dirty       bool
+	execLine    int
+	execWaiting bool
+	selecting   bool
+	selStartRow int
+	selStartCol int
+	selEndRow   int
+	selEndCol   int
 }
 
 func New() Model {
@@ -52,6 +59,9 @@ func (m *Model) LoadFile(path, content string) {
 	m.rowOffset = 0
 	m.colOffset = 0
 	m.dirty = false
+	m.execLine = 0
+	m.execWaiting = false
+	m.ClearSelection()
 }
 
 func (m Model) Path() string {
@@ -69,6 +79,48 @@ func (m Model) CurrentLine() string {
 	return m.lines[m.cursorRow]
 }
 
+func (m Model) HasSelection() bool {
+	return m.selStartRow != m.selEndRow || m.selStartCol != m.selEndCol
+}
+
+func (m *Model) ClearSelection() {
+	m.selecting = false
+	m.selStartRow = 0
+	m.selStartCol = 0
+	m.selEndRow = 0
+	m.selEndCol = 0
+}
+
+func (m Model) SelectedText() string {
+	if !m.HasSelection() {
+		return ""
+	}
+	startRow, startCol, endRow, endCol := normalizeSelection(m.selStartRow, m.selStartCol, m.selEndRow, m.selEndCol)
+	if startRow < 0 || startRow >= len(m.lines) {
+		return ""
+	}
+	if endRow >= len(m.lines) {
+		endRow = len(m.lines) - 1
+	}
+	parts := make([]string, 0, endRow-startRow+1)
+	for row := startRow; row <= endRow; row++ {
+		runes := []rune(m.lines[row])
+		from := 0
+		to := len(runes)
+		if row == startRow {
+			from = clamp(startCol, 0, len(runes))
+		}
+		if row == endRow {
+			to = clamp(endCol, 0, len(runes))
+		}
+		if from > to {
+			from = to
+		}
+		parts = append(parts, string(runes[from:to]))
+	}
+	return strings.Join(parts, "\n")
+}
+
 func (m Model) Content() string {
 	return strings.Join(m.lines, "\n")
 }
@@ -77,6 +129,7 @@ func (m *Model) PasteText(text string) {
 	if text == "" {
 		return
 	}
+	m.ClearSelection()
 	m.insertText(strings.ReplaceAll(text, "\r\n", "\n"))
 	m.dirty = true
 	m.clampCursor()
@@ -84,6 +137,33 @@ func (m *Model) PasteText(text string) {
 }
 
 func (m *Model) SetCursorFromView(row, col int) {
+	m.setCursorFromView(row, col)
+	m.ClearSelection()
+}
+
+func (m *Model) BeginSelectionFromView(row, col int) {
+	m.setCursorFromView(row, col)
+	m.selecting = true
+	m.selStartRow = m.cursorRow
+	m.selStartCol = m.cursorCol
+	m.selEndRow = m.cursorRow
+	m.selEndCol = m.cursorCol
+}
+
+func (m *Model) UpdateSelectionFromView(row, col int) {
+	if !m.selecting {
+		return
+	}
+	m.setCursorFromView(row, col)
+	m.selEndRow = m.cursorRow
+	m.selEndCol = m.cursorCol
+}
+
+func (m *Model) EndSelection() {
+	m.selecting = false
+}
+
+func (m *Model) setCursorFromView(row, col int) {
 	lineNumberWidth := max(3, len(fmt.Sprintf("%d", len(m.lines))))
 	contentCol := col - (lineNumberWidth + 3)
 	if contentCol < 0 {
@@ -117,6 +197,35 @@ func (m *Model) Scroll(delta int) {
 		m.cursorRow = m.rowOffset + m.height - 1
 	}
 	m.clampCursor()
+}
+
+func (m *Model) SetExecution(line int, waiting bool) {
+	m.execLine = line
+	m.execWaiting = waiting
+	if line > 0 {
+		m.RevealLine(line)
+	}
+}
+
+func (m *Model) ClearExecution() {
+	m.execLine = 0
+	m.execWaiting = false
+}
+
+func (m *Model) RevealLine(line int) {
+	if line <= 0 {
+		return
+	}
+	target := line - 1
+	if target < m.rowOffset {
+		m.rowOffset = target
+	}
+	if target >= m.rowOffset+m.height {
+		m.rowOffset = target - m.height + 1
+	}
+	if m.rowOffset < 0 {
+		m.rowOffset = 0
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
@@ -161,10 +270,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case "enter":
 		changed = m.insertNewline()
 	case "tab":
+		m.ClearSelection()
 		m.insertText("    ")
 		changed = true
 	default:
 		if key.Type == tea.KeyRunes || key.Type == tea.KeySpace {
+			m.ClearSelection()
 			m.insertText(key.String())
 			changed = true
 		}
@@ -187,7 +298,7 @@ func (m Model) View() string {
 	}
 
 	lineNumberWidth := max(3, len(fmt.Sprintf("%d", len(m.lines))))
-	contentWidth := max(1, m.width-lineNumberWidth-3)
+	contentWidth := max(1, m.width-lineNumberWidth-4)
 
 	var rendered []string
 	for i := 0; i < m.height; i++ {
@@ -195,15 +306,37 @@ func (m Model) View() string {
 		number := " "
 		text := ""
 		if lineIndex < len(m.lines) {
-			number = fmt.Sprintf("%*d", lineNumberWidth, lineIndex+1)
+			marker := " "
+			if m.execLine == lineIndex+1 {
+				if m.execWaiting {
+					marker = "●"
+				} else {
+					marker = "▶"
+				}
+			}
+			number = fmt.Sprintf("%s%*d", marker, lineNumberWidth, lineIndex+1)
 			text = m.renderLine(lineIndex, contentWidth)
 		} else {
-			number = strings.Repeat(" ", lineNumberWidth)
+			number = strings.Repeat(" ", lineNumberWidth+1)
 		}
 
 		numStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 		if lineIndex == m.cursorRow {
 			numStyle = numStyle.Foreground(lipgloss.Color("14")).Bold(true)
+		} else if m.execLine == lineIndex+1 {
+			if m.execWaiting {
+				numStyle = numStyle.Foreground(lipgloss.Color("11")).Bold(true)
+			} else {
+				numStyle = numStyle.Foreground(lipgloss.Color("10")).Bold(true)
+			}
+		}
+
+		if m.execLine == lineIndex+1 && lineIndex != m.cursorRow {
+			bg := lipgloss.NewStyle().Background(lipgloss.Color("236"))
+			if m.execWaiting {
+				bg = lipgloss.NewStyle().Background(lipgloss.Color("58"))
+			}
+			text = bg.Render(text)
 		}
 
 		rendered = append(rendered, numStyle.Render(number)+" │ "+text)
@@ -215,10 +348,15 @@ func (m Model) View() string {
 func (m Model) renderLine(lineIndex, contentWidth int) string {
 	line := m.lines[lineIndex]
 	chunks := highlightLine(m.path, line)
-	if lineIndex == m.cursorRow {
-		return renderChunksWithCursor(chunks, m.colOffset, contentWidth, m.cursorCol)
-	}
-	return renderChunks(chunks, m.colOffset, contentWidth)
+	startCol, endCol, selected := m.selectionForLine(lineIndex)
+	return renderChunks(chunks, m.colOffset, contentWidth, cursorRender{
+		enabled: lineIndex == m.cursorRow,
+		col:     m.cursorCol,
+	}, selectionRender{
+		enabled: selected,
+		start:   startCol,
+		end:     endCol,
+	})
 }
 
 func (m *Model) clampCursor() {
@@ -293,6 +431,7 @@ func (m *Model) MarkSaved() {
 }
 
 func (m *Model) insertNewline() bool {
+	m.ClearSelection()
 	line := m.lines[m.cursorRow]
 	left, right := splitAtRune(line, m.cursorCol)
 	m.lines[m.cursorRow] = left
@@ -304,6 +443,7 @@ func (m *Model) insertNewline() bool {
 }
 
 func (m *Model) deleteBackward() bool {
+	m.ClearSelection()
 	if m.cursorCol > 0 {
 		line := m.lines[m.cursorRow]
 		m.lines[m.cursorRow] = removeRuneAt(line, m.cursorCol-1)
@@ -323,6 +463,7 @@ func (m *Model) deleteBackward() bool {
 }
 
 func (m *Model) deleteForward() bool {
+	m.ClearSelection()
 	line := m.lines[m.cursorRow]
 	if m.cursorCol < runeCount(line) {
 		m.lines[m.cursorRow] = removeRuneAt(line, m.cursorCol)
@@ -368,38 +509,20 @@ type styledChunk struct {
 	style lipgloss.Style
 }
 
-func renderChunks(chunks []styledChunk, offset, width int) string {
-	remainingOffset := offset
-	remainingWidth := width
-	var b strings.Builder
-
-	for _, chunk := range chunks {
-		if remainingWidth <= 0 {
-			break
-		}
-
-		runes := []rune(chunk.text)
-		if remainingOffset >= len(runes) {
-			remainingOffset -= len(runes)
-			continue
-		}
-
-		start := remainingOffset
-		end := min(len(runes), start+remainingWidth)
-		b.WriteString(chunk.style.Render(string(runes[start:end])))
-		remainingWidth -= end - start
-		remainingOffset = 0
-	}
-
-	if remainingWidth > 0 {
-		b.WriteString(strings.Repeat(" ", remainingWidth))
-	}
-
-	return b.String()
+type cursorRender struct {
+	enabled bool
+	col     int
 }
 
-func renderChunksWithCursor(chunks []styledChunk, offset, width, cursorCol int) string {
+type selectionRender struct {
+	enabled bool
+	start   int
+	end     int
+}
+
+func renderChunks(chunks []styledChunk, offset, width int, cursor cursorRender, selection selectionRender) string {
 	cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15"))
+	selectionStyle := lipgloss.NewStyle().Background(lipgloss.Color("13")).Foreground(lipgloss.Color("15"))
 	remainingOffset := offset
 	remainingWidth := width
 	visibleCol := 0
@@ -420,11 +543,15 @@ func renderChunksWithCursor(chunks []styledChunk, offset, width, cursorCol int) 
 		end := min(len(runes), start+remainingWidth)
 		for _, r := range runes[start:end] {
 			part := string(r)
-			if offset+visibleCol == cursorCol {
-				b.WriteString(cursorStyle.Render(part))
-			} else {
-				b.WriteString(chunk.style.Render(part))
+			absoluteCol := offset + visibleCol
+			style := chunk.style
+			switch {
+			case selection.enabled && absoluteCol >= selection.start && absoluteCol < selection.end:
+				style = style.Background(lipgloss.Color("13")).Foreground(lipgloss.Color("15"))
+			case cursor.enabled && absoluteCol == cursor.col:
+				style = cursorStyle
 			}
+			b.WriteString(style.Render(part))
 			visibleCol++
 			remainingWidth--
 			if remainingWidth <= 0 {
@@ -434,14 +561,42 @@ func renderChunksWithCursor(chunks []styledChunk, offset, width, cursorCol int) 
 		remainingOffset = 0
 	}
 
-	if offset+visibleCol == cursorCol && remainingWidth > 0 {
-		b.WriteString(cursorStyle.Render(" "))
+	if cursor.enabled && offset+visibleCol == cursor.col && remainingWidth > 0 {
+		style := cursorStyle
+		if selection.enabled && cursor.col >= selection.start && cursor.col < selection.end {
+			style = selectionStyle
+		}
+		b.WriteString(style.Render(" "))
 		remainingWidth--
 	}
 	if remainingWidth > 0 {
 		b.WriteString(strings.Repeat(" ", remainingWidth))
 	}
+
 	return b.String()
+}
+
+func (m Model) selectionForLine(lineIndex int) (int, int, bool) {
+	if !m.HasSelection() {
+		return 0, 0, false
+	}
+	startRow, startCol, endRow, endCol := normalizeSelection(m.selStartRow, m.selStartCol, m.selEndRow, m.selEndCol)
+	if lineIndex < startRow || lineIndex > endRow {
+		return 0, 0, false
+	}
+	lineLen := runeCount(m.lines[lineIndex])
+	start := 0
+	end := lineLen
+	if lineIndex == startRow {
+		start = clamp(startCol, 0, lineLen)
+	}
+	if lineIndex == endRow {
+		end = clamp(endCol, 0, lineLen)
+	}
+	if start > end {
+		start = end
+	}
+	return start, end, true
 }
 
 func styleForToken(tokenType chroma.TokenType) lipgloss.Style {
@@ -468,6 +623,23 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clamp(v, low, high int) int {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
+}
+
+func normalizeSelection(startRow, startCol, endRow, endCol int) (int, int, int, int) {
+	if startRow < endRow || (startRow == endRow && startCol <= endCol) {
+		return startRow, startCol, endRow, endCol
+	}
+	return endRow, endCol, startRow, startCol
 }
 
 func max(a, b int) int {

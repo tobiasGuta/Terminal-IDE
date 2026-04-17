@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,6 +21,7 @@ const (
 	screenWelcome screen = iota
 	screenPicker
 	screenNewFile
+	screenInterpreterPicker
 	screenEditor
 )
 
@@ -29,13 +31,14 @@ type debounceMsg struct {
 }
 
 type editorTab struct {
-	id            int
-	path          string
-	editor        editor.Model
-	output        outputModel
-	status        string
-	debounceToken int
-	activeRunID   int
+	id                int
+	path              string
+	editor            editor.Model
+	output            outputModel
+	status            string
+	debounceToken     int
+	activeRunID       int
+	pythonInterpreter string
 }
 
 type tabHitbox struct {
@@ -68,27 +71,32 @@ type appModel struct {
 	activeTab    int
 	nextTabID    int
 
-	welcome welcomeModel
-	picker  filepicker.Model
-	newFile newFileModel
-	runner  *runner.Manager
-	status  string
-	focus   string
-	tabs    []editorTab
-	layout  editorLayout
+	welcome            welcomeModel
+	picker             filepicker.Model
+	newFile            newFileModel
+	interpreterPicker  interpreterPickerModel
+	runner             *runner.Manager
+	status             string
+	focus              string
+	tabs               []editorTab
+	layout             editorLayout
+	pythonInterpreters []runner.PythonInterpreter
 }
 
 func NewApp() tea.Model {
+	interpreters, _ := runner.DiscoverPythonInterpreters()
 	return &appModel{
-		screen:     screenWelcome,
-		prevScreen: screenWelcome,
-		activeTab:  -1,
-		welcome:    newWelcomeModel(),
-		picker:     filepicker.New("", filepicker.PickFile),
-		newFile:    newNewFileModel(pickerStartPath("")),
-		runner:     runner.New(),
-		status:     "Choose a file to begin.",
-		focus:      "editor",
+		screen:             screenWelcome,
+		prevScreen:         screenWelcome,
+		activeTab:          -1,
+		welcome:            newWelcomeModel(),
+		picker:             filepicker.New("", filepicker.PickFile),
+		newFile:            newNewFileModel(pickerStartPath("")),
+		interpreterPicker:  newInterpreterPickerModel(nil, ""),
+		runner:             runner.New(),
+		status:             "Choose a file to begin.",
+		focus:              "editor",
+		pythonInterpreters: interpreters,
 	}
 }
 
@@ -117,9 +125,22 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForRunnerEvent(m.runner)
 
+	case runner.ExecutionMsg:
+		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
+			m.tabs[idx].editor.SetExecution(msg.Line, msg.Waiting)
+			switch msg.State {
+			case "waiting_input":
+				m.tabs[idx].status = fmt.Sprintf("Waiting for input on line %d", msg.Line)
+			case "line", "resumed":
+				m.tabs[idx].status = fmt.Sprintf("Executing line %d", msg.Line)
+			}
+		}
+		return m, waitForRunnerEvent(m.runner)
+
 	case runner.FinishedMsg:
 		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
 			m.tabs[idx].activeRunID = 0
+			m.tabs[idx].editor.ClearExecution()
 			if idx == m.activeTab {
 				m.tabs[idx].output.SetInputFocus(false)
 				m.focus = "editor"
@@ -175,6 +196,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch {
 			case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
 				return m, m.handleMouseClick(msg.X, msg.Y)
+			case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft:
+				m.handleMouseDrag(msg.X, msg.Y)
+				return m, nil
+			case msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft:
+				m.handleMouseRelease()
+				return m, nil
 			case msg.Button == tea.MouseButtonWheelUp:
 				m.handleMouseScroll(msg.X, msg.Y, -3)
 				return m, nil
@@ -196,6 +223,28 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+e":
 			m.tabs[m.activeTab].output.SetInputFocus(false)
 			m.focus = "editor"
+			return m, nil
+		case "ctrl+v":
+			text, err := readClipboard()
+			if err != nil {
+				m.tabs[m.activeTab].status = err.Error()
+			} else {
+				m.tabs[m.activeTab].output.PasteInput(text)
+				m.tabs[m.activeTab].status = "Pasted into live input"
+			}
+			return m, nil
+		case "ctrl+c":
+			text := m.tabs[m.activeTab].output.InputValue()
+			status := "Copied input to clipboard"
+			if m.tabs[m.activeTab].output.HasSelection() {
+				text = m.tabs[m.activeTab].output.SelectedText()
+				status = "Copied selected output"
+			}
+			if err := writeClipboard(text); err != nil {
+				m.tabs[m.activeTab].status = err.Error()
+			} else {
+				m.tabs[m.activeTab].status = status
+			}
 			return m, nil
 		case "ctrl+l":
 			return m, nil
@@ -221,10 +270,22 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		if m.screen == screenEditor && m.hasActiveTab() {
 			var text string
-			if m.tabs[m.activeTab].output.InputFocused() {
-				text = m.tabs[m.activeTab].output.InputValue()
-			} else {
-				text = m.tabs[m.activeTab].editor.CurrentLine()
+			switch m.focus {
+			case "output":
+				if m.tabs[m.activeTab].output.HasSelection() {
+					text = m.tabs[m.activeTab].output.SelectedText()
+				} else if m.tabs[m.activeTab].output.InputFocused() {
+					text = m.tabs[m.activeTab].output.InputValue()
+				}
+			default:
+				if m.tabs[m.activeTab].editor.HasSelection() {
+					text = m.tabs[m.activeTab].editor.SelectedText()
+				} else {
+					text = m.tabs[m.activeTab].editor.CurrentLine()
+				}
+			}
+			if text == "" && m.tabs[m.activeTab].output.HasSelection() && m.focus != "editor" {
+				text = m.tabs[m.activeTab].output.SelectedText()
 			}
 			if err := writeClipboard(text); err != nil {
 				m.tabs[m.activeTab].status = err.Error()
@@ -256,6 +317,14 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = "output"
 			return m, nil
 		}
+	case "ctrl+r":
+		if m.screen == screenEditor && m.hasActiveTab() && strings.EqualFold(filepath.Ext(m.tabs[m.activeTab].path), ".py") {
+			m.interpreterPicker = newInterpreterPickerModel(m.pythonInterpreters, m.tabs[m.activeTab].pythonInterpreter)
+			m.interpreterPicker.SetSize(m.width, m.height)
+			m.pushScreen(m.screen)
+			m.screen = screenInterpreterPicker
+			return m, nil
+		}
 	case "ctrl+]":
 		if m.screen == screenEditor && len(m.tabs) > 1 {
 			m.activateTab((m.activeTab + 1) % len(m.tabs))
@@ -278,7 +347,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		switch m.screen {
-		case screenPicker, screenNewFile:
+		case screenPicker, screenNewFile, screenInterpreterPicker:
 			m.screen = m.popScreen()
 			if m.screen == screenEditor && m.hasActiveTab() {
 				m.tabs[m.activeTab].output.SetInputFocus(false)
@@ -384,6 +453,30 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
+	case screenInterpreterPicker:
+		var cmd tea.Cmd
+		m.interpreterPicker, cmd = m.interpreterPicker.Update(msg)
+		if key.String() == "enter" && m.hasActiveTab() {
+			selected := m.interpreterPicker.SelectedCommand()
+			m.tabs[m.activeTab].pythonInterpreter = selected
+			if selected == "" {
+				m.tabs[m.activeTab].status = "Interpreter: auto"
+			} else {
+				label := filepath.Base(selected)
+				for _, item := range m.pythonInterpreters {
+					if item.Path == selected {
+						label = item.Command
+						break
+					}
+				}
+				m.tabs[m.activeTab].status = fmt.Sprintf("Interpreter: %s", label)
+			}
+			m.screen = m.popScreen()
+			m.startRunForTab(m.activeTab, "Interpreter changed, running...")
+			return m, nil
+		}
+		return m, cmd
+
 	case screenEditor:
 		if m.hasActiveTab() {
 			var cmd tea.Cmd
@@ -408,6 +501,8 @@ func (m *appModel) View() string {
 		return appPaddingStyle.Render(card)
 	case screenNewFile:
 		return m.newFile.View()
+	case screenInterpreterPicker:
+		return m.interpreterPicker.View()
 	case screenEditor:
 		if !m.hasActiveTab() {
 			return m.welcome.View()
@@ -427,7 +522,7 @@ func (m *appModel) View() string {
 			BorderBottom(true).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("8")).
-			Render(titleStyle.Render(filepath.Base(tab.path)) + "  " + mutedStyle.Render(tab.status))
+			Render(titleStyle.Render(filepath.Base(tab.path)) + "  " + mutedStyle.Render(tab.status) + m.renderInterpreterBadge(tab))
 
 		m.layout = editorLayout{
 			panelX:       appPaddingStyle.GetHorizontalFrameSize() / 2,
@@ -447,7 +542,7 @@ func (m *appModel) View() string {
 		)
 		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
 		bottom := bottomStyle.Render(tab.output.View())
-		footer := mutedStyle.Render("ctrl+s save • ctrl+o open • ctrl+w close tab • shift+tab prev • tab or ctrl+] next • ctrl+c/cv clipboard • mouse focus")
+		footer := mutedStyle.Render("ctrl+s save • ctrl+o open • ctrl+w close tab • shift+tab prev • tab or ctrl+] next • ctrl+r interpreter • ctrl+c/cv clipboard • mouse focus")
 		return appPaddingStyle.Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom, footer))
 	default:
 		return ""
@@ -468,6 +563,7 @@ func (m *appModel) resize() {
 	m.welcome.SetSize(m.width, m.height)
 	m.picker.SetSize(max(10, m.width-6), max(6, m.height-6))
 	m.newFile.SetSize(m.width, m.height)
+	m.interpreterPicker.SetSize(m.width, m.height)
 	for i := range m.tabs {
 		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-2))
 		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
@@ -546,7 +642,12 @@ func (m *appModel) startRunForTab(index int, status string) {
 		return
 	}
 	tab := &m.tabs[index]
-	tab.activeRunID = m.runner.Start(tab.path, tab.editor.Content())
+	opts := runner.RunOptions{}
+	if strings.EqualFold(filepath.Ext(tab.path), ".py") {
+		opts.PythonInterpreter = tab.pythonInterpreter
+	}
+	tab.activeRunID = m.runner.Start(tab.path, tab.editor.Content(), opts)
+	tab.editor.ClearExecution()
 	tab.output.Reset(status)
 	tab.output.ClearInput()
 	tab.output.SetInputFocus(false)
@@ -650,18 +751,74 @@ func (m *appModel) handleMouseClick(x, y int) tea.Cmd {
 		m.focus = "editor"
 
 		if y >= layout.editorBodyY {
-			m.tabs[m.activeTab].editor.SetCursorFromView(y-layout.editorBodyY, x-layout.contentX)
+			m.tabs[m.activeTab].editor.BeginSelectionFromView(y-layout.editorBodyY, x-layout.contentX)
 		}
 		return nil
 	}
 
 	if y >= layout.bottomY && y < layout.bottomY+layout.bottomHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		m.tabs[m.activeTab].output.SetInputFocus(true)
+		viewRow := y - (layout.bottomY + 1)
+		col := x - layout.contentX
+		outputRows := m.tabs[m.activeTab].output.visibleOutputLineCount()
+		inputRow := m.tabs[m.activeTab].output.inputViewRow()
+		m.tabs[m.activeTab].output.SetInputFocus(viewRow == inputRow)
 		m.focus = "output"
+		if viewRow >= 1 && viewRow <= outputRows {
+			m.tabs[m.activeTab].output.BeginSelection(viewRow-1, col)
+		} else {
+			m.tabs[m.activeTab].output.ClearSelection()
+		}
 		return nil
 	}
 
 	return nil
+}
+
+func (m *appModel) handleMouseDrag(x, y int) {
+	if !m.hasActiveTab() {
+		return
+	}
+	layout := m.currentEditorLayout()
+	if y >= layout.panelY && y < layout.panelY+layout.topHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
+		if y >= layout.editorBodyY {
+			m.tabs[m.activeTab].editor.UpdateSelectionFromView(y-layout.editorBodyY, x-layout.contentX)
+		}
+		return
+	}
+	if y >= layout.bottomY && y < layout.bottomY+layout.bottomHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
+		viewRow := y - (layout.bottomY + 1)
+		col := x - layout.contentX
+		if viewRow >= 1 {
+			m.tabs[m.activeTab].output.UpdateSelection(viewRow-1, col)
+		}
+	}
+}
+
+func (m *appModel) handleMouseRelease() {
+	if !m.hasActiveTab() {
+		return
+	}
+	m.tabs[m.activeTab].editor.EndSelection()
+	m.tabs[m.activeTab].output.EndSelection()
+}
+
+func (m *appModel) renderInterpreterBadge(tab editorTab) string {
+	if !strings.EqualFold(filepath.Ext(tab.path), ".py") {
+		return ""
+	}
+
+	label := "auto"
+	if tab.pythonInterpreter != "" {
+		label = filepath.Base(tab.pythonInterpreter)
+		for _, item := range m.pythonInterpreters {
+			if item.Path == tab.pythonInterpreter {
+				label = item.Command
+				break
+			}
+		}
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	return "  " + style.Render("[py: "+label+"]")
 }
 
 func (m *appModel) handleMouseScroll(x, y, delta int) {
