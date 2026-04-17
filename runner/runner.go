@@ -228,7 +228,9 @@ func commandForPath(ctx context.Context, path string) (*exec.Cmd, error) {
 		if err != nil {
 			return nil, err
 		}
-		return exec.CommandContext(ctx, interpreter, path), nil
+		cmd := exec.CommandContext(ctx, interpreter, "-u", path)
+		cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+		return cmd, nil
 	case ".go":
 		return exec.CommandContext(ctx, "go", "run", path), nil
 	default:

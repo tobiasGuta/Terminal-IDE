@@ -51,6 +51,7 @@ go run ./cmd/ide
 - Python files try to pick the right interpreter automatically:
   - explicit shebangs like `#!/usr/bin/env python2` are respected
   - otherwise the app probes available Python interpreters and falls back to syntax hints
+- Python files are launched in unbuffered mode so prompts from `input()` and `raw_input()` show immediately.
 - `Open Folder` lets you choose a directory first, then browse files inside it.
 
 ## Screenshots

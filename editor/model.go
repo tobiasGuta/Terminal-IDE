@@ -96,6 +96,29 @@ func (m *Model) SetCursorFromView(row, col int) {
 	m.ensureCursorVisible()
 }
 
+func (m *Model) Scroll(delta int) {
+	if delta == 0 {
+		return
+	}
+
+	maxOffset := max(0, len(m.lines)-m.height)
+	m.rowOffset += delta
+	if m.rowOffset < 0 {
+		m.rowOffset = 0
+	}
+	if m.rowOffset > maxOffset {
+		m.rowOffset = maxOffset
+	}
+
+	if m.cursorRow < m.rowOffset {
+		m.cursorRow = m.rowOffset
+	}
+	if m.cursorRow >= m.rowOffset+m.height {
+		m.cursorRow = m.rowOffset + m.height - 1
+	}
+	m.clampCursor()
+}
+
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
