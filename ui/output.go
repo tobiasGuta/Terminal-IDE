@@ -7,8 +7,9 @@ import (
 )
 
 type outputLine struct {
-	text  string
-	isErr bool
+	text      string
+	isErr     bool
+	colorCode string
 }
 
 type outputModel struct {
@@ -73,6 +74,26 @@ func (m *outputModel) Append(text string, isErr bool) {
 	}
 }
 
+func (m *outputModel) AppendAIBlock(header, headerColor, content string) {
+	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+	if header == "" || content == "" {
+		return
+	}
+	if m.pending != "" {
+		m.lines = append(m.lines, outputLine{text: m.pending, isErr: m.pendingErr})
+		m.pending = ""
+		m.pendingErr = false
+	}
+
+	m.lines = append(m.lines, outputLine{
+		text:      "── " + header + " ──",
+		colorCode: headerColor,
+	})
+	for _, line := range strings.Split(content, "\n") {
+		m.lines = append(m.lines, outputLine{text: line})
+	}
+}
+
 func (m *outputModel) SetStatus(status string) {
 	m.status = status
 }
@@ -99,6 +120,19 @@ func (m *outputModel) ClearSelection() {
 
 func (m *outputModel) InputValue() string {
 	return string(m.inputBuffer)
+}
+
+func (m outputModel) StderrText() string {
+	var lines []string
+	for _, line := range m.lines {
+		if line.isErr {
+			lines = append(lines, line.text)
+		}
+	}
+	if m.pendingErr && m.pending != "" {
+		lines = append(lines, m.pending)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *outputModel) PasteInput(text string) {
@@ -267,6 +301,8 @@ func (m outputModel) renderOutputLine(absIndex int, line outputLine) string {
 	base := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	if line.isErr {
 		base = errorStyle
+	} else if line.colorCode != "" {
+		base = lipgloss.NewStyle().Foreground(lipgloss.Color(line.colorCode)).Bold(true)
 	}
 	if !m.HasSelection() {
 		return base.Render(line.text)

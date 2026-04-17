@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"terminal-ide/ai"
 	"terminal-ide/editor"
 	"terminal-ide/filepicker"
 	"terminal-ide/runner"
@@ -22,6 +25,7 @@ const (
 	screenPicker
 	screenNewFile
 	screenInterpreterPicker
+	screenModelPicker
 	screenEditor
 )
 
@@ -29,6 +33,23 @@ type debounceMsg struct {
 	tabID int
 	token int
 }
+
+type aiResultMsg struct {
+	tabIndex    int
+	content     string
+	header      string
+	headerColor string
+}
+
+type aiResponseMsg struct {
+	tabIndex    int
+	text        string
+	err         error
+	header      string
+	headerColor string
+}
+
+type aiThinkingTickMsg struct{}
 
 type editorTab struct {
 	id                int
@@ -39,6 +60,9 @@ type editorTab struct {
 	debounceToken     int
 	activeRunID       int
 	pythonInterpreter string
+	aiCooldownUntil   time.Time
+	hintLevel         int
+	lastHintSource    string
 }
 
 type tabHitbox struct {
@@ -75,7 +99,13 @@ type appModel struct {
 	picker             filepicker.Model
 	newFile            newFileModel
 	interpreterPicker  interpreterPickerModel
+	modelPicker        modelPickerModel
 	runner             *runner.Manager
+	aiClient           *ai.Client
+	selectedAIModel    string
+	aiLoading          bool
+	aiThinkingFrame    int
+	aiThinkingTab      int
 	status             string
 	focus              string
 	tabs               []editorTab
@@ -85,6 +115,7 @@ type appModel struct {
 
 func NewApp() tea.Model {
 	interpreters, _ := runner.DiscoverPythonInterpreters()
+	aiClient := ai.NewClient(os.Getenv("OPENAI_API_KEY"), os.Getenv("GEMINI_API_KEY"), "")
 	return &appModel{
 		screen:             screenWelcome,
 		prevScreen:         screenWelcome,
@@ -93,7 +124,11 @@ func NewApp() tea.Model {
 		picker:             filepicker.New("", filepicker.PickFile),
 		newFile:            newNewFileModel(pickerStartPath("")),
 		interpreterPicker:  newInterpreterPickerModel(nil, ""),
+		modelPicker:        newModelPickerModel(nil, ""),
 		runner:             runner.New(),
+		aiClient:           aiClient,
+		selectedAIModel:    aiClient.Model(),
+		aiThinkingTab:      -1,
 		status:             "Choose a file to begin.",
 		focus:              "editor",
 		pythonInterpreters: interpreters,
@@ -173,6 +208,36 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForRunnerEvent(m.runner)
 
+	case aiResultMsg:
+		if msg.tabIndex >= 0 && msg.tabIndex < len(m.tabs) && msg.content != "" {
+			m.tabs[msg.tabIndex].output.AppendAIBlock(msg.header, msg.headerColor, msg.content)
+			m.tabs[msg.tabIndex].status = "AI response ready"
+		}
+		return m, nil
+
+	case aiResponseMsg:
+		m.aiLoading = false
+		m.aiThinkingFrame = 0
+		m.aiThinkingTab = -1
+		if msg.tabIndex >= 0 && msg.tabIndex < len(m.tabs) {
+			content := strings.TrimSpace(msg.text)
+			if msg.err != nil {
+				content = formatAIError(msg.err)
+			}
+			if content != "" {
+				m.tabs[msg.tabIndex].output.AppendAIBlock(msg.header, msg.headerColor, content)
+				m.tabs[msg.tabIndex].status = "AI response ready"
+			}
+		}
+		return m, nil
+
+	case aiThinkingTickMsg:
+		if !m.aiLoading {
+			return m, nil
+		}
+		m.aiThinkingFrame = (m.aiThinkingFrame + 1) % len(aiThinkingFrames)
+		return m, scheduleAIThinkingTick()
+
 	case filepicker.SelectedMsg:
 		if msg.Mode == filepicker.PickDirectory {
 			m.picker = filepicker.New(msg.Path, filepicker.PickFile)
@@ -194,6 +259,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editor.ChangedMsg:
 		if m.screen == screenEditor && m.hasActiveTab() {
+			if m.tabs[m.activeTab].activeRunID != 0 {
+				m.runner.StopRun(m.tabs[m.activeTab].activeRunID)
+				m.tabs[m.activeTab].activeRunID = 0
+				m.tabs[m.activeTab].output.Reset("Queued run...")
+				m.tabs[m.activeTab].output.ClearInput()
+				m.tabs[m.activeTab].output.SetInputFocus(false)
+				m.tabs[m.activeTab].status = "Queued run..."
+				m.focus = "editor"
+			}
+			m.tabs[m.activeTab].hintLevel = 1
+			m.tabs[m.activeTab].lastHintSource = ""
 			return m, scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
 		}
 
@@ -292,6 +368,22 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "ctrl+q":
 		m.runner.Stop()
 		return m, tea.Quit
+	case "ctrl+e":
+		if m.screen == screenEditor && m.hasActiveTab() && !m.tabs[m.activeTab].output.InputFocused() {
+			cmd := m.startAIErrorExplanation(m.activeTab)
+			return m, cmd
+		}
+	case "ctrl+h":
+		if m.screen == screenEditor && m.hasActiveTab() && !m.tabs[m.activeTab].output.InputFocused() {
+			cmd := m.startAIHint(m.activeTab)
+			return m, cmd
+		}
+	case "ctrl+m", "alt+m":
+		if m.screen == screenEditor {
+			if handled := m.openModelPicker(); handled {
+				return m, nil
+			}
+		}
 	case "ctrl+c":
 		if m.screen == screenEditor && m.hasActiveTab() {
 			var text string
@@ -372,7 +464,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		switch m.screen {
-		case screenPicker, screenNewFile, screenInterpreterPicker:
+		case screenPicker, screenNewFile, screenInterpreterPicker, screenModelPicker:
 			m.screen = m.popScreen()
 			if m.screen == screenEditor && m.hasActiveTab() {
 				m.tabs[m.activeTab].output.SetInputFocus(false)
@@ -502,6 +594,21 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
+	case screenModelPicker:
+		var cmd tea.Cmd
+		m.modelPicker, cmd = m.modelPicker.Update(msg)
+		if key.String() == "enter" {
+			provider, model := m.modelPicker.Selected()
+			if provider != "" && model != "" {
+				m.aiClient.SetModel(provider, model)
+				m.selectedAIModel = m.aiClient.Model()
+				m.status = fmt.Sprintf("AI model set to %s", m.selectedAIModel)
+			}
+			m.screen = m.popScreen()
+			return m, nil
+		}
+		return m, cmd
+
 	case screenEditor:
 		if m.hasActiveTab() {
 			var cmd tea.Cmd
@@ -528,6 +635,8 @@ func (m *appModel) View() string {
 		return m.newFile.View()
 	case screenInterpreterPicker:
 		return m.interpreterPicker.View()
+	case screenModelPicker:
+		return m.modelPicker.View()
 	case screenEditor:
 		if !m.hasActiveTab() {
 			return m.welcome.View()
@@ -567,7 +676,8 @@ func (m *appModel) View() string {
 		)
 		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
 		bottom := bottomStyle.Render(tab.output.View())
-		footer := mutedStyle.Render("ctrl+s save • ctrl+o open • ctrl+w close tab • shift+tab prev • tab or ctrl+] next • ctrl+r interpreter • ctrl+c/cv clipboard • mouse focus")
+		footerLeft := "ctrl+s save • ctrl+o open • ctrl+w close tab • ctrl+e explain • ctrl+h hint • alt+m model • shift+tab prev • tab or ctrl+] next • ctrl+r interpreter • ctrl+c/cv clipboard • mouse focus"
+		footer := renderFooter(panelWidth, footerLeft, m.selectedAIModel, m.aiStatusText())
 		return appPaddingStyle.Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom, footer))
 	default:
 		return ""
@@ -589,6 +699,7 @@ func (m *appModel) resize() {
 	m.picker.SetSize(max(10, m.width-6), max(6, m.height-6))
 	m.newFile.SetSize(m.width, m.height)
 	m.interpreterPicker.SetSize(m.width, m.height)
+	m.modelPicker.SetSize(m.width, m.height)
 	for i := range m.tabs {
 		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-2))
 		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
@@ -936,6 +1047,143 @@ func waitForRunnerEvent(manager *runner.Manager) tea.Cmd {
 	}
 }
 
+func scheduleAIThinkingTick() tea.Cmd {
+	return tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg {
+		return aiThinkingTickMsg{}
+	})
+}
+
+func (m *appModel) openModelPicker() bool {
+	options := availableAIModels()
+	if len(options) == 0 {
+		m.status = "Set GEMINI_API_KEY or OPENAI_API_KEY to enable AI models."
+		return false
+	}
+	if len(options) == 1 || onlyOneAIProvider(options) {
+		provider, model := options[0].provider, options[0].model
+		m.aiClient.SetModel(provider, model)
+		m.selectedAIModel = m.aiClient.Model()
+		m.status = fmt.Sprintf("AI model set to %s", m.selectedAIModel)
+		return true
+	}
+
+	m.modelPicker = newModelPickerModel(options, m.selectedAIModel)
+	m.modelPicker.SetSize(m.width, m.height)
+	m.pushScreen(m.screen)
+	m.screen = screenModelPicker
+	return true
+}
+
+func (m *appModel) startAIErrorExplanation(index int) tea.Cmd {
+	if index < 0 || index >= len(m.tabs) || m.aiClient == nil || m.aiClient.Disabled() {
+		if index >= 0 && index < len(m.tabs) {
+			m.tabs[index].status = "AI decoder requires GEMINI_API_KEY or OPENAI_API_KEY."
+		}
+		return nil
+	}
+
+	traceback := strings.TrimSpace(m.tabs[index].output.StderrText())
+	if traceback == "" {
+		m.tabs[index].status = "No error output to analyze."
+		return nil
+	}
+	if !m.claimAICooldown(index) {
+		return nil
+	}
+
+	m.aiLoading = true
+	m.aiThinkingFrame = 0
+	m.aiThinkingTab = index
+	m.tabs[index].status = "Analyzing error..."
+	code := m.tabs[index].editor.Content()
+	return tea.Batch(scheduleAIThinkingTick(), func() tea.Msg {
+		content, err := m.aiClient.ExplainError(context.Background(), code, traceback)
+		return aiResponseMsg{
+			tabIndex:    index,
+			text:        content,
+			err:         err,
+			header:      "AI Explanation",
+			headerColor: "14",
+		}
+	})
+}
+
+func (m *appModel) startAIHint(index int) tea.Cmd {
+	if index < 0 || index >= len(m.tabs) {
+		return nil
+	}
+	if m.aiClient == nil || m.aiClient.Disabled() {
+		m.tabs[index].status = "AI hints require GEMINI_API_KEY or OPENAI_API_KEY."
+		return nil
+	}
+
+	tab := &m.tabs[index]
+	source := tab.editor.Content()
+	if tab.lastHintSource == source && tab.hintLevel > 0 {
+		tab.hintLevel = min(tab.hintLevel+1, 3)
+	} else {
+		tab.hintLevel = 1
+	}
+	tab.lastHintSource = source
+	if !m.claimAICooldown(index) {
+		return nil
+	}
+	m.aiLoading = true
+	m.aiThinkingFrame = 0
+	m.aiThinkingTab = index
+	tab.status = fmt.Sprintf("Generating hint (level %d)...", tab.hintLevel)
+
+	currentError := tab.output.StderrText()
+	currentLine := tab.editor.ExecutionLine()
+	hintLevel := tab.hintLevel
+	return tea.Batch(scheduleAIThinkingTick(), func() tea.Msg {
+		content, err := m.aiClient.GetHint(context.Background(), source, currentError, currentLine, hintLevel)
+		return aiResponseMsg{
+			tabIndex:    index,
+			text:        content,
+			err:         err,
+			header:      fmt.Sprintf("AI Hint (Level %d)", hintLevel),
+			headerColor: "11",
+		}
+	})
+}
+
+func (m *appModel) claimAICooldown(index int) bool {
+	if index < 0 || index >= len(m.tabs) {
+		return false
+	}
+	now := time.Now()
+	if now.Before(m.tabs[index].aiCooldownUntil) {
+		return false
+	}
+	m.tabs[index].aiCooldownUntil = now.Add(10 * time.Second)
+	return true
+}
+
+func formatAIError(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "AI request timed out. Check your connection."
+	case errors.Is(err, ai.ErrParseResponse):
+		return "AI response could not be parsed."
+	default:
+		var statusErr ai.ErrHTTPStatus
+		if errors.As(err, &statusErr) {
+			switch {
+			case statusErr.StatusCode == 429 && statusErr.Provider == "gemini":
+				return "Gemini rate limit reached. Wait a moment and try again."
+			case statusErr.StatusCode == 429 && statusErr.Provider == "openai":
+				return "OpenAI rate limit reached. Wait a moment and try again."
+			case statusErr.StatusCode >= 400 && statusErr.StatusCode < 500:
+				return fmt.Sprintf("AI service returned an error (HTTP %d). Check your API key.", statusErr.StatusCode)
+			case statusErr.StatusCode >= 500:
+				return "AI service is temporarily unavailable. Try again later."
+			}
+		}
+		return "AI service returned an error. Try again later."
+	}
+}
+
 func pickerStartPath(path string) string {
 	if path == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -962,4 +1210,84 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func availableAIModels() []aiModelOption {
+	var items []aiModelOption
+	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" {
+		items = append(items,
+			aiModelOption{provider: "gemini", model: "gemini-2.5-flash", detail: "(recommended, fast)"},
+			aiModelOption{provider: "gemini", model: "gemini-2.0-flash", detail: "(stable alternative)"},
+			aiModelOption{provider: "gemini", model: "gemini-1.5-flash", detail: "(alternative)"},
+			aiModelOption{provider: "gemini", model: "gemini-1.5-pro", detail: "(more capable, lower rate limit)"},
+		)
+	}
+	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		items = append(items,
+			aiModelOption{provider: "openai", model: "gpt-4o-mini", detail: "(affordable)"},
+			aiModelOption{provider: "openai", model: "gpt-4o", detail: "(most capable)"},
+		)
+	}
+	return items
+}
+
+func onlyOneAIProvider(items []aiModelOption) bool {
+	if len(items) == 0 {
+		return false
+	}
+	provider := items[0].provider
+	for _, item := range items[1:] {
+		if item.provider != provider {
+			return false
+		}
+	}
+	return true
+}
+
+func renderFooter(width int, left, model, thinking string) string {
+	leftRendered := mutedStyle.Render(left)
+	rightText := model
+	if thinking != "" {
+		if rightText != "" {
+			rightText = thinking + "  " + rightText
+		} else {
+			rightText = thinking
+		}
+	}
+	if rightText == "" {
+		return lipgloss.NewStyle().Width(width).Render(leftRendered)
+	}
+
+	rightRendered := mutedStyle.Render(rightText)
+	leftWidth := lipgloss.Width(leftRendered)
+	rightWidth := lipgloss.Width(rightRendered)
+	if leftWidth+rightWidth+1 > width {
+		return lipgloss.NewStyle().Width(width).Render(leftRendered)
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(leftRendered + strings.Repeat(" ", width-leftWidth-rightWidth) + rightRendered)
+}
+
+var aiThinkingFrames = []string{
+	"[Thinking   ]",
+	"[Thinking.  ]",
+	"[Thinking.. ]",
+	"[Thinking...]",
+}
+
+func (m *appModel) aiStatusText() string {
+	if !m.aiLoading {
+		return ""
+	}
+	if m.aiThinkingFrame < 0 || m.aiThinkingFrame >= len(aiThinkingFrames) {
+		return aiThinkingFrames[0]
+	}
+	return aiThinkingFrames[m.aiThinkingFrame]
 }
