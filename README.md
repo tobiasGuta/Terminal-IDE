@@ -47,6 +47,7 @@ go run ./cmd/ide
 
 - Python syntax highlighting is included through Chroma.
 - Live execution currently supports `.py` and `.go` files.
+- `Ctrl+C` currently copies the current editor line or live input buffer, not a text selection.
 - Python files try to pick the right interpreter automatically:
   - explicit shebangs like `#!/usr/bin/env python2` are respected
   - otherwise the app probes available Python interpreters and falls back to syntax hints

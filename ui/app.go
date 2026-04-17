@@ -44,8 +44,22 @@ type tabHitbox struct {
 	end   int
 }
 
+type editorLayout struct {
+	panelX       int
+	panelY       int
+	panelWidth   int
+	topHeight    int
+	bottomY      int
+	bottomHeight int
+	tabBarY      int
+	tabBarX      int
+	editorBodyY  int
+	contentX     int
+}
+
 type appModel struct {
 	screen       screen
+	prevScreen   screen
 	width        int
 	height       int
 	editorHeight int
@@ -64,14 +78,15 @@ type appModel struct {
 
 func NewApp() tea.Model {
 	return &appModel{
-		screen:    screenWelcome,
-		activeTab: -1,
-		welcome:   newWelcomeModel(),
-		picker:    filepicker.New("", filepicker.PickFile),
-		newFile:   newNewFileModel(pickerStartPath("")),
-		runner:    runner.New(),
-		status:    "Choose a file to begin.",
-		focus:     "editor",
+		screen:     screenWelcome,
+		prevScreen: screenWelcome,
+		activeTab:  -1,
+		welcome:    newWelcomeModel(),
+		picker:     filepicker.New("", filepicker.PickFile),
+		newFile:    newNewFileModel(pickerStartPath("")),
+		runner:     runner.New(),
+		status:     "Choose a file to begin.",
+		focus:      "editor",
 	}
 }
 
@@ -102,6 +117,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runner.FinishedMsg:
 		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
+			m.tabs[idx].activeRunID = 0
 			if idx == m.activeTab {
 				m.tabs[idx].output.SetInputFocus(false)
 				m.focus = "editor"
@@ -250,7 +266,18 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "esc":
-		if m.screen == screenEditor || m.screen == screenPicker || m.screen == screenNewFile {
+		switch m.screen {
+		case screenPicker, screenNewFile:
+			m.screen = m.prevScreen
+			if m.screen == screenEditor && m.hasActiveTab() {
+				m.tabs[m.activeTab].output.SetInputFocus(false)
+				m.focus = "editor"
+				m.status = "Cancelled."
+			} else {
+				m.status = "Returned to welcome menu."
+			}
+			return m, nil
+		case screenEditor:
 			m.screen = screenWelcome
 			m.status = "Returned to welcome menu."
 			m.runner.Stop()
@@ -267,6 +294,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.picker = filepicker.New(root, filepicker.PickFile)
 		m.picker.SetSize(m.width-6, m.height-6)
+		m.prevScreen = m.screen
 		m.screen = screenPicker
 		return m, nil
 	case "ctrl+s":
@@ -293,16 +321,19 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.welcome.SetMessage("")
 				m.picker = filepicker.New(pickerStartPath(""), filepicker.PickFile)
 				m.picker.SetSize(m.width-6, m.height-6)
+				m.prevScreen = screenWelcome
 				m.screen = screenPicker
 			case "Open Folder":
 				m.welcome.SetMessage("")
 				m.picker = filepicker.New(pickerStartPath(""), filepicker.PickDirectory)
 				m.picker.SetSize(m.width-6, m.height-6)
+				m.prevScreen = screenWelcome
 				m.screen = screenPicker
 			case "Create New File":
 				m.welcome.SetMessage("")
 				m.newFile = newNewFileModel(m.defaultCreateDir())
 				m.newFile.SetSize(m.width, m.height)
+				m.prevScreen = screenWelcome
 				m.screen = screenNewFile
 			case "Recent Files (Soon)":
 				m.welcome.SetMessage("Recent Files is not implemented yet.")
@@ -577,25 +608,11 @@ func (m *appModel) handleMouseClick(x, y int) tea.Cmd {
 		return nil
 	}
 
-	const (
-		appPadX   = 2
-		appPadY   = 1
-		border    = 1
-		panelPadX = 1
-	)
+	layout := m.currentEditorLayout()
 
-	panelX := appPadX
-	panelY := appPadY
-	panelWidth := max(20, m.width-4)
-	topHeight := max(4, m.editorHeight) + (border * 2)
-	bottomY := panelY + topHeight
-	bottomHeight := max(3, m.outputHeight) + (border * 2)
-
-	if y >= panelY && y < panelY+topHeight && x >= panelX && x < panelX+panelWidth {
-		tabBarY := panelY
-		tabBarX := panelX + border + panelPadX
-		if y >= tabBarY && y <= tabBarY+1 {
-			relativeX := x - tabBarX
+	if y >= layout.panelY && y < layout.panelY+layout.topHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
+		if y >= layout.tabBarY && y < layout.tabBarY+2 {
+			relativeX := x - layout.tabBarX
 			for _, hitbox := range m.tabHitboxes() {
 				if (relativeX >= hitbox.start && relativeX < hitbox.end) ||
 					(relativeX-1 >= hitbox.start && relativeX-1 < hitbox.end) {
@@ -608,15 +625,13 @@ func (m *appModel) handleMouseClick(x, y int) tea.Cmd {
 		m.tabs[m.activeTab].output.SetInputFocus(false)
 		m.focus = "editor"
 
-		contentX := panelX + border + panelPadX
-		editorBodyY := panelY + border + 4
-		if y >= editorBodyY {
-			m.tabs[m.activeTab].editor.SetCursorFromView(y-editorBodyY, x-contentX)
+		if y >= layout.editorBodyY {
+			m.tabs[m.activeTab].editor.SetCursorFromView(y-layout.editorBodyY, x-layout.contentX)
 		}
 		return nil
 	}
 
-	if y >= bottomY && y < bottomY+bottomHeight && x >= panelX && x < panelX+panelWidth {
+	if y >= layout.bottomY && y < layout.bottomY+layout.bottomHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
 		m.tabs[m.activeTab].output.SetInputFocus(true)
 		m.focus = "output"
 		return nil
@@ -634,6 +649,50 @@ func truncateLabel(label string, maxWidth int) string {
 		return string(runes[:maxWidth])
 	}
 	return string(runes[:maxWidth-1]) + "…"
+}
+
+func (m *appModel) currentEditorLayout() editorLayout {
+	panelWidth := max(20, m.width-4)
+	appPadX := appPaddingStyle.GetHorizontalFrameSize() / 2
+	appPadY := appPaddingStyle.GetVerticalFrameSize() / 2
+	panelInsetX := activePanelStyle.GetHorizontalFrameSize() / 2
+	panelInsetY := activePanelStyle.GetVerticalFrameSize() / 2
+
+	tabBarHeight := 1
+	headerHeight := 1
+	if m.hasActiveTab() {
+		headerWidth := max(10, panelWidth-4)
+		tabBar := lipgloss.NewStyle().
+			Width(headerWidth).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("8")).
+			Render(m.renderTabBar(headerWidth))
+		header := lipgloss.NewStyle().
+			Width(headerWidth).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("8")).
+			Render(titleStyle.Render(filepath.Base(m.tabs[m.activeTab].path)) + "  " + mutedStyle.Render(m.tabs[m.activeTab].status))
+		tabBarHeight = lipgloss.Height(tabBar)
+		headerHeight = lipgloss.Height(header)
+	}
+
+	topHeight := max(4, m.editorHeight) + activePanelStyle.GetVerticalFrameSize()
+	bottomHeight := max(3, m.outputHeight) + panelStyle.GetVerticalFrameSize()
+
+	return editorLayout{
+		panelX:       appPadX,
+		panelY:       appPadY,
+		panelWidth:   panelWidth,
+		topHeight:    topHeight,
+		bottomY:      appPadY + topHeight,
+		bottomHeight: bottomHeight,
+		tabBarY:      appPadY + panelInsetY - 1,
+		tabBarX:      appPadX + panelInsetX,
+		editorBodyY:  appPadY + panelInsetY + tabBarHeight + headerHeight,
+		contentX:     appPadX + panelInsetX,
+	}
 }
 
 func (m *appModel) hasActiveTab() bool {
