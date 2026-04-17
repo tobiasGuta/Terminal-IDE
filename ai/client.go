@@ -17,8 +17,10 @@ const (
 	defaultOpenAIModel       = "gpt-4o-mini"
 	defaultGeminiModel       = "gemini-2.5-flash"
 	requestTimeout           = 15 * time.Second
-	maxGeminiRetries         = 3
+	maxGeminiAttempts        = 3
 )
+
+var geminiRetryBackoffs = [...]time.Duration{2 * time.Second, 4 * time.Second}
 
 const explainSystemPrompt = "You are a friendly programming tutor helping a beginner student. When given a Python error traceback and the student's code, explain what went wrong in plain English in 2-3 sentences maximum. Be warm and encouraging. Point to the specific line number if possible. Suggest one concrete fix. Never show corrected code - only describe what to change."
 
@@ -132,9 +134,9 @@ func (c *Client) sendPrompt(ctx context.Context, systemPrompt, userPrompt string
 
 	switch c.provider {
 	case "gemini":
-		return callGemini(reqCtx, c.geminiKey, c.model, systemPrompt, userPrompt)
+		return callGemini(reqCtx, c.httpClient, c.geminiKey, c.model, systemPrompt, userPrompt)
 	case "openai":
-		return callOpenAI(reqCtx, c.openaiKey, c.model, systemPrompt, userPrompt)
+		return callOpenAI(reqCtx, c.httpClient, c.openaiKey, c.model, systemPrompt, userPrompt)
 	default:
 		return "", nil
 	}
@@ -164,7 +166,11 @@ func (c *Client) selectProviderAndModel(preferredModel string) (string, string) 
 	}
 }
 
-func callOpenAI(ctx context.Context, apiKey, model, systemPrompt, userPrompt string) (string, error) {
+func callOpenAI(ctx context.Context, httpClient *http.Client, apiKey, model, systemPrompt, userPrompt string) (string, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
 	payload := openAIChatCompletionRequest{
 		Model: model,
 		Messages: []chatMessage{
@@ -185,7 +191,7 @@ func callOpenAI(ctx context.Context, apiKey, model, systemPrompt, userPrompt str
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -210,7 +216,11 @@ func callOpenAI(ctx context.Context, apiKey, model, systemPrompt, userPrompt str
 	return content, nil
 }
 
-func callGemini(ctx context.Context, apiKey, model, systemPrompt, userMessage string) (string, error) {
+func callGemini(ctx context.Context, httpClient *http.Client, apiKey, model, systemPrompt, userMessage string) (string, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
 	endpoint := fmt.Sprintf(
 		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
 		url.PathEscape(model),
@@ -239,14 +249,14 @@ func callGemini(ctx context.Context, apiKey, model, systemPrompt, userMessage st
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxGeminiRetries; attempt++ {
+	for attempt := 0; attempt < maxGeminiAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", err
 		}
@@ -254,9 +264,8 @@ func callGemini(ctx context.Context, apiKey, model, systemPrompt, userMessage st
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			lastErr = ErrHTTPStatus{Provider: "gemini", StatusCode: resp.StatusCode}
 			resp.Body.Close()
-			if attempt < maxGeminiRetries-1 {
-				backoff := time.Duration(2<<attempt) * time.Second
-				timer := time.NewTimer(backoff)
+			if attempt < len(geminiRetryBackoffs) {
+				timer := time.NewTimer(geminiRetryBackoffs[attempt])
 				select {
 				case <-ctx.Done():
 					timer.Stop()

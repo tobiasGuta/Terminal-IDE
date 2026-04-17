@@ -220,6 +220,13 @@ https://github.com/user-attachments/assets/09de9aaa-8242-43d1-b2f9-c98f8a584418
 
 ### AI
 
+ctrl + h
+
 https://github.com/user-attachments/assets/65b0ebc9-f699-4bb4-9631-ec69534666ab
 
 ----
+
+ctrl + E
+
+<img width="1916" height="966" alt="image" src="https://github.com/user-attachments/assets/cb8005d2-4064-4dad-980f-aa82bfb38f8b" />
+
