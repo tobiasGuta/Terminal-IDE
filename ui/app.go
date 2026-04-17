@@ -151,7 +151,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runner.StartedMsg:
 		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
-			m.tabs[idx].output.Reset("Running...")
+			m.tabs[idx].output.SetStatus("Running...")
 			m.tabs[idx].status = "Running..."
 		}
 		return m, waitForRunnerEvent(m.runner)
@@ -789,7 +789,7 @@ func (m *appModel) startRunForTab(index int, status string) {
 	}
 	tab.activeRunID = m.runner.Start(tab.path, tab.editor.Content(), opts)
 	tab.editor.ClearExecution()
-	tab.output.Reset(status)
+	tab.output.StartSession(status, m.runCommandLabel(*tab))
 	tab.output.ClearInput()
 	tab.output.SetInputFocus(false)
 	tab.status = status
@@ -963,6 +963,22 @@ func (m *appModel) renderInterpreterBadge(tab editorTab) string {
 	}
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	return "  " + style.Render("[py: "+label+"]")
+}
+
+func (m *appModel) runCommandLabel(tab editorTab) string {
+	base := filepath.Base(tab.path)
+	switch strings.ToLower(filepath.Ext(tab.path)) {
+	case ".py":
+		interpreter := "python"
+		if tab.pythonInterpreter != "" {
+			interpreter = filepath.Base(tab.pythonInterpreter)
+		}
+		return "➜ " + interpreter + " " + base
+	case ".go":
+		return "➜ go run " + base
+	default:
+		return "➜ " + base
+	}
 }
 
 func (m *appModel) handleMouseScroll(x, y, delta int) {

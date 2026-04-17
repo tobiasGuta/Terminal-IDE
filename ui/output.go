@@ -34,6 +34,17 @@ func newOutputModel() outputModel {
 	}
 }
 
+func (m *outputModel) StartSession(status, command string) {
+	m.Reset(status)
+	command = strings.TrimSpace(command)
+	if command != "" {
+		m.lines = append(m.lines, outputLine{
+			text:      command,
+			colorCode: "14",
+		})
+	}
+}
+
 func (m *outputModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
@@ -252,16 +263,18 @@ func (m outputModel) View() string {
 		body = append(body, m.renderOutputLine(start+i, line))
 	}
 
-	if len(visibleLines) == 0 {
+	activeInput := m.activeInputLine()
+	if len(visibleLines) == 0 && activeInput == "" {
 		body = append(body, mutedStyle.Render("Output will appear here after the next run."))
 	}
 
-	label := mutedStyle.Render("Input")
-	if m.inputFocus {
-		label = accentStyle.Render("Input")
+	if activeInput != "" {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		if m.inputFocus {
+			style = accentStyle
+		}
+		body = append(body, style.Render(activeInput))
 	}
-	body = append(body, "")
-	body = append(body, label+": "+string(m.inputBuffer)+"_")
 
 	return strings.Join(body, "\n")
 }
@@ -269,14 +282,17 @@ func (m outputModel) View() string {
 func (m outputModel) allOutputLines() []outputLine {
 	lines := make([]outputLine, 0, len(m.lines)+1)
 	lines = append(lines, m.lines...)
-	if m.pending != "" {
+	if m.pending != "" && !m.inputFocus {
 		lines = append(lines, outputLine{text: m.pending, isErr: m.pendingErr})
 	}
 	return lines
 }
 
 func (m outputModel) visibleOutputLines() ([]outputLine, int) {
-	available := max(1, m.height-4)
+	available := max(1, m.height-1)
+	if m.activeInputLine() != "" {
+		available = max(1, available-1)
+	}
 	lines := m.allOutputLines()
 	start := 0
 	if len(lines) > available {
@@ -294,7 +310,22 @@ func (m outputModel) visibleOutputLineCount() int {
 }
 
 func (m outputModel) inputViewRow() int {
-	return 2 + m.visibleOutputLineCount()
+	if m.activeInputLine() == "" {
+		return -1
+	}
+	return 1 + m.visibleOutputLineCount()
+}
+
+func (m outputModel) activeInputLine() string {
+	if !m.inputFocus {
+		return ""
+	}
+
+	prompt := m.pending
+	if prompt == "" {
+		prompt = "> "
+	}
+	return prompt + string(m.inputBuffer) + "_"
 }
 
 func (m outputModel) renderOutputLine(absIndex int, line outputLine) string {
