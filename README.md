@@ -42,7 +42,8 @@ AI is optional. If no API key is set, the editor still works normally and AI fea
 Gemini is the default AI provider when `GEMINI_API_KEY` is set.
 
 ```bash
-export GEMINI_API_KEY="your-gemini-api-key" go run ./cmd/ide
+export GEMINI_API_KEY="your-gemini-api-key"
+go run ./cmd/ide
 ```
 
 Default Gemini model:
@@ -60,7 +61,8 @@ Other Gemini models available in the picker:
 If Gemini is not configured but `OPENAI_API_KEY` is set, the app falls back to OpenAI.
 
 ```bash
-export OPENAI_API_KEY="your-openai-api-key" go run ./cmd/ide
+export OPENAI_API_KEY="your-openai-api-key"
+go run ./cmd/ide
 ```
 
 Available OpenAI models:
@@ -215,3 +217,11 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 ----
 
 https://github.com/user-attachments/assets/09de9aaa-8242-43d1-b2f9-c98f8a584418
+
+----
+
+### AI
+
+https://github.com/user-attachments/assets/65b0ebc9-f699-4bb4-9631-ec69534666ab
+
+----
