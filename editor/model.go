@@ -62,8 +62,38 @@ func (m Model) Dirty() bool {
 	return m.dirty
 }
 
+func (m Model) CurrentLine() string {
+	if len(m.lines) == 0 || m.cursorRow < 0 || m.cursorRow >= len(m.lines) {
+		return ""
+	}
+	return m.lines[m.cursorRow]
+}
+
 func (m Model) Content() string {
 	return strings.Join(m.lines, "\n")
+}
+
+func (m *Model) PasteText(text string) {
+	if text == "" {
+		return
+	}
+	m.insertText(strings.ReplaceAll(text, "\r\n", "\n"))
+	m.dirty = true
+	m.clampCursor()
+	m.ensureCursorVisible()
+}
+
+func (m *Model) SetCursorFromView(row, col int) {
+	lineNumberWidth := max(3, len(fmt.Sprintf("%d", len(m.lines))))
+	contentCol := col - (lineNumberWidth + 3)
+	if contentCol < 0 {
+		contentCol = 0
+	}
+
+	m.cursorRow = m.rowOffset + row
+	m.cursorCol = m.colOffset + contentCol
+	m.clampCursor()
+	m.ensureCursorVisible()
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
@@ -84,10 +114,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.cursorCol--
 		} else if m.cursorRow > 0 {
 			m.cursorRow--
-			m.cursorCol = len(m.lines[m.cursorRow])
+			m.cursorCol = runeCount(m.lines[m.cursorRow])
 		}
 	case "right":
-		if m.cursorCol < len(m.lines[m.cursorRow]) {
+		if m.cursorCol < runeCount(m.lines[m.cursorRow]) {
 			m.cursorCol++
 		} else if m.cursorRow < len(m.lines)-1 {
 			m.cursorRow++
@@ -96,7 +126,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case "home":
 		m.cursorCol = 0
 	case "end":
-		m.cursorCol = len(m.lines[m.cursorRow])
+		m.cursorCol = runeCount(m.lines[m.cursorRow])
 	case "pgup":
 		m.cursorRow -= max(1, m.height-1)
 	case "pgdown":
@@ -135,7 +165,6 @@ func (m Model) View() string {
 
 	lineNumberWidth := max(3, len(fmt.Sprintf("%d", len(m.lines))))
 	contentWidth := max(1, m.width-lineNumberWidth-3)
-	visible := m.visibleLines(contentWidth)
 
 	var rendered []string
 	for i := 0; i < m.height; i++ {
@@ -144,10 +173,7 @@ func (m Model) View() string {
 		text := ""
 		if lineIndex < len(m.lines) {
 			number = fmt.Sprintf("%*d", lineNumberWidth, lineIndex+1)
-			text = visible[lineIndex]
-			if lineIndex == m.cursorRow {
-				text = m.renderCursorLine(contentWidth)
-			}
+			text = m.renderLine(lineIndex, contentWidth)
 		} else {
 			number = strings.Repeat(" ", lineNumberWidth)
 		}
@@ -163,40 +189,13 @@ func (m Model) View() string {
 	return strings.Join(rendered, "\n")
 }
 
-func (m Model) visibleLines(contentWidth int) []string {
-	return highlightLines(m.path, m.Content(), m.colOffset, contentWidth)
-}
-
-func (m Model) renderCursorLine(contentWidth int) string {
-	line := m.lines[m.cursorRow]
-	start := min(m.colOffset, len(line))
-	end := min(len(line), m.colOffset+contentWidth)
-	segment := []rune(line[start:end])
-	cursorWithin := m.cursorCol - start
-
-	baseStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15"))
-
-	var b strings.Builder
-	for i := 0; i < len(segment); i++ {
-		ch := string(segment[i])
-		if i == cursorWithin {
-			b.WriteString(cursorStyle.Render(ch))
-		} else {
-			b.WriteString(baseStyle.Render(ch))
-		}
+func (m Model) renderLine(lineIndex, contentWidth int) string {
+	line := m.lines[lineIndex]
+	chunks := highlightLine(m.path, line)
+	if lineIndex == m.cursorRow {
+		return renderChunksWithCursor(chunks, m.colOffset, contentWidth, m.cursorCol)
 	}
-
-	if cursorWithin == len(segment) && cursorWithin < contentWidth {
-		b.WriteString(cursorStyle.Render(" "))
-	}
-
-	rendered := b.String()
-	width := lipgloss.Width(rendered)
-	if width < contentWidth {
-		rendered += strings.Repeat(" ", contentWidth-width)
-	}
-	return rendered
+	return renderChunks(chunks, m.colOffset, contentWidth)
 }
 
 func (m *Model) clampCursor() {
@@ -209,7 +208,7 @@ func (m *Model) clampCursor() {
 	if m.cursorRow >= len(m.lines) {
 		m.cursorRow = len(m.lines) - 1
 	}
-	lineWidth := len(m.lines[m.cursorRow])
+	lineWidth := runeCount(m.lines[m.cursorRow])
 	if m.cursorCol < 0 {
 		m.cursorCol = 0
 	}
@@ -244,14 +243,16 @@ func (m *Model) insertText(text string) {
 	parts := strings.Split(text, "\n")
 	if len(parts) == 1 {
 		line := m.lines[m.cursorRow]
-		m.lines[m.cursorRow] = line[:m.cursorCol] + text + line[m.cursorCol:]
-		m.cursorCol += len(text)
+		left, right := splitAtRune(line, m.cursorCol)
+		m.lines[m.cursorRow] = left + text + right
+		m.cursorCol += runeCount(text)
 		return
 	}
 
 	current := m.lines[m.cursorRow]
-	head := current[:m.cursorCol] + parts[0]
-	tail := parts[len(parts)-1] + current[m.cursorCol:]
+	left, right := splitAtRune(current, m.cursorCol)
+	head := left + parts[0]
+	tail := parts[len(parts)-1] + right
 	middle := parts[1 : len(parts)-1]
 
 	newLines := append([]string{}, m.lines[:m.cursorRow]...)
@@ -261,7 +262,7 @@ func (m *Model) insertText(text string) {
 	newLines = append(newLines, m.lines[m.cursorRow+1:]...)
 	m.lines = newLines
 	m.cursorRow += len(parts) - 1
-	m.cursorCol = len(parts[len(parts)-1])
+	m.cursorCol = runeCount(parts[len(parts)-1])
 }
 
 func (m *Model) MarkSaved() {
@@ -270,8 +271,7 @@ func (m *Model) MarkSaved() {
 
 func (m *Model) insertNewline() bool {
 	line := m.lines[m.cursorRow]
-	left := line[:m.cursorCol]
-	right := line[m.cursorCol:]
+	left, right := splitAtRune(line, m.cursorCol)
 	m.lines[m.cursorRow] = left
 	next := append([]string{right}, m.lines[m.cursorRow+1:]...)
 	m.lines = append(m.lines[:m.cursorRow+1], next...)
@@ -283,7 +283,7 @@ func (m *Model) insertNewline() bool {
 func (m *Model) deleteBackward() bool {
 	if m.cursorCol > 0 {
 		line := m.lines[m.cursorRow]
-		m.lines[m.cursorRow] = line[:m.cursorCol-1] + line[m.cursorCol:]
+		m.lines[m.cursorRow] = removeRuneAt(line, m.cursorCol-1)
 		m.cursorCol--
 		return true
 	}
@@ -292,7 +292,7 @@ func (m *Model) deleteBackward() bool {
 	}
 	prev := m.lines[m.cursorRow-1]
 	current := m.lines[m.cursorRow]
-	m.cursorCol = len(prev)
+	m.cursorCol = runeCount(prev)
 	m.lines[m.cursorRow-1] = prev + current
 	m.lines = append(m.lines[:m.cursorRow], m.lines[m.cursorRow+1:]...)
 	m.cursorRow--
@@ -301,8 +301,8 @@ func (m *Model) deleteBackward() bool {
 
 func (m *Model) deleteForward() bool {
 	line := m.lines[m.cursorRow]
-	if m.cursorCol < len(line) {
-		m.lines[m.cursorRow] = line[:m.cursorCol] + line[m.cursorCol+1:]
+	if m.cursorCol < runeCount(line) {
+		m.lines[m.cursorRow] = removeRuneAt(line, m.cursorCol)
 		return true
 	}
 	if m.cursorRow >= len(m.lines)-1 {
@@ -313,44 +313,31 @@ func (m *Model) deleteForward() bool {
 	return true
 }
 
-func highlightLines(path, source string, offset, width int) []string {
+func highlightLine(path, line string) []styledChunk {
 	lexer := lexers.Match(path)
 	if lexer == nil {
-		lexer = lexers.Analyse(source)
+		lexer = lexers.Analyse(line)
 	}
 	if lexer == nil {
 		lexer = lexers.Fallback
 	}
 
-	iterator, err := lexer.Tokenise(nil, source)
+	iterator, err := lexer.Tokenise(nil, line)
 	if err != nil {
-		return plainLines(source, offset, width)
+		return []styledChunk{{text: line, style: styleForToken(chroma.Text)}}
 	}
 
-	lines := [][]styledChunk{{}}
+	chunks := make([]styledChunk, 0, 8)
 	for token := iterator(); token != chroma.EOF; token = iterator() {
-		parts := strings.Split(token.Value, "\n")
-		for i, part := range parts {
-			if part != "" {
-				lines[len(lines)-1] = append(lines[len(lines)-1], styledChunk{
-					text:  part,
-					style: styleForToken(token.Type),
-				})
-			}
-			if i < len(parts)-1 {
-				lines = append(lines, []styledChunk{})
-			}
+		if token.Value == "" {
+			continue
 		}
+		chunks = append(chunks, styledChunk{
+			text:  token.Value,
+			style: styleForToken(token.Type),
+		})
 	}
-
-	rendered := make([]string, 0, max(len(lines), 1))
-	for _, line := range lines {
-		rendered = append(rendered, renderChunks(line, offset, width))
-	}
-	for len(rendered) < len(strings.Split(strings.ReplaceAll(source, "\r\n", "\n"), "\n")) {
-		rendered = append(rendered, "")
-	}
-	return rendered
+	return chunks
 }
 
 type styledChunk struct {
@@ -388,23 +375,50 @@ func renderChunks(chunks []styledChunk, offset, width int) string {
 	return b.String()
 }
 
-func plainLines(source string, offset, width int) []string {
-	raw := strings.Split(strings.ReplaceAll(source, "\r\n", "\n"), "\n")
-	lines := make([]string, 0, len(raw))
-	for _, line := range raw {
-		runes := []rune(line)
-		if offset >= len(runes) {
-			lines = append(lines, strings.Repeat(" ", width))
+func renderChunksWithCursor(chunks []styledChunk, offset, width, cursorCol int) string {
+	cursorStyle := lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15"))
+	remainingOffset := offset
+	remainingWidth := width
+	visibleCol := 0
+	var b strings.Builder
+
+	for _, chunk := range chunks {
+		if remainingWidth <= 0 {
+			break
+		}
+
+		runes := []rune(chunk.text)
+		if remainingOffset >= len(runes) {
+			remainingOffset -= len(runes)
 			continue
 		}
-		end := min(len(runes), offset+width)
-		segment := string(runes[offset:end])
-		if lipgloss.Width(segment) < width {
-			segment += strings.Repeat(" ", width-lipgloss.Width(segment))
+
+		start := remainingOffset
+		end := min(len(runes), start+remainingWidth)
+		for _, r := range runes[start:end] {
+			part := string(r)
+			if offset+visibleCol == cursorCol {
+				b.WriteString(cursorStyle.Render(part))
+			} else {
+				b.WriteString(chunk.style.Render(part))
+			}
+			visibleCol++
+			remainingWidth--
+			if remainingWidth <= 0 {
+				break
+			}
 		}
-		lines = append(lines, segment)
+		remainingOffset = 0
 	}
-	return lines
+
+	if offset+visibleCol == cursorCol && remainingWidth > 0 {
+		b.WriteString(cursorStyle.Render(" "))
+		remainingWidth--
+	}
+	if remainingWidth > 0 {
+		b.WriteString(strings.Repeat(" ", remainingWidth))
+	}
+	return b.String()
 }
 
 func styleForToken(tokenType chroma.TokenType) lipgloss.Style {
@@ -438,4 +452,22 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func splitAtRune(s string, idx int) (string, string) {
+	runes := []rune(s)
+	idx = min(max(idx, 0), len(runes))
+	return string(runes[:idx]), string(runes[idx:])
+}
+
+func removeRuneAt(s string, idx int) string {
+	runes := []rune(s)
+	if idx < 0 || idx >= len(runes) {
+		return s
+	}
+	return string(append(runes[:idx], runes[idx+1:]...))
+}
+
+func runeCount(s string) int {
+	return len([]rune(s))
 }

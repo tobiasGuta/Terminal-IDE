@@ -12,11 +12,12 @@ type welcomeModel struct {
 	options []string
 	width   int
 	height  int
+	message string
 }
 
 func newWelcomeModel() welcomeModel {
 	return welcomeModel{
-		options: []string{"Open File", "Open Folder", "Recent Files (Soon)"},
+		options: []string{"Open File", "Open Folder", "Create New File", "Recent Files (Soon)"},
 	}
 }
 
@@ -27,6 +28,10 @@ func (m *welcomeModel) SetSize(width, height int) {
 
 func (m welcomeModel) Selected() string {
 	return m.options[m.index]
+}
+
+func (m *welcomeModel) SetMessage(message string) {
+	m.message = message
 }
 
 func (m welcomeModel) Update(msg tea.Msg) (welcomeModel, tea.Cmd) {
@@ -71,6 +76,8 @@ func (m welcomeModel) View() string {
 		"",
 		strings.Join(items, "\n"),
 		"",
+		errorStyle.Render(m.message),
+		mutedStyle.Render(""),
 		mutedStyle.Render("↑/↓ move • enter select • ctrl+q quit"),
 	)
 

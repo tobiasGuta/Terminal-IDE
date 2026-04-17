@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -91,6 +90,22 @@ func (m *Manager) Stop() {
 	}
 }
 
+func (m *Manager) StopRun(id int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id != m.seq {
+		return
+	}
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	if m.stdin != nil {
+		_ = m.stdin.Close()
+		m.stdin = nil
+	}
+}
+
 func (m *Manager) SendInput(id int, input string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -169,13 +184,21 @@ func (m *Manager) run(ctx context.Context, id int, path, content string) {
 func (m *Manager) stream(id int, reader io.Reader, isErr bool, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		m.events <- OutputMsg{ID: id, Text: scanner.Text() + "\n", IsErr: isErr}
-	}
-
-	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
-		m.events <- OutputMsg{ID: id, Text: err.Error() + "\n", IsErr: true}
+	buf := make([]byte, 256)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			m.events <- OutputMsg{ID: id, Text: string(buf[:n]), IsErr: isErr}
+		}
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			if !strings.Contains(err.Error(), "file already closed") {
+				m.events <- OutputMsg{ID: id, Text: err.Error() + "\n", IsErr: true}
+			}
+			return
+		}
 	}
 }
 

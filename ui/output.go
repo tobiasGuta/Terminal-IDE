@@ -13,6 +13,8 @@ type outputLine struct {
 
 type outputModel struct {
 	lines       []outputLine
+	pending     string
+	pendingErr  bool
 	status      string
 	inputBuffer []rune
 	inputFocus  bool
@@ -33,14 +35,34 @@ func (m *outputModel) SetSize(width, height int) {
 
 func (m *outputModel) Reset(status string) {
 	m.lines = nil
+	m.pending = ""
+	m.pendingErr = false
 	m.status = status
 }
 
 func (m *outputModel) Append(text string, isErr bool) {
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		if line == "" {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	if text == "" {
+		return
+	}
+
+	if m.pending != "" && m.pendingErr != isErr {
+		m.lines = append(m.lines, outputLine{text: m.pending, isErr: m.pendingErr})
+		m.pending = ""
+	}
+
+	parts := strings.Split(text, "\n")
+	for i, part := range parts {
+		isLast := i == len(parts)-1
+		if isLast {
+			m.pending += part
+			m.pendingErr = isErr
 			continue
 		}
+
+		line := m.pending + part
+		m.pending = ""
+		m.pendingErr = isErr
 		m.lines = append(m.lines, outputLine{text: line, isErr: isErr})
 	}
 }
@@ -59,6 +81,19 @@ func (m outputModel) InputFocused() bool {
 
 func (m *outputModel) ClearInput() {
 	m.inputBuffer = nil
+}
+
+func (m *outputModel) InputValue() string {
+	return string(m.inputBuffer)
+}
+
+func (m *outputModel) PasteInput(text string) {
+	if text == "" {
+		return
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", " ")
+	m.inputBuffer = append(m.inputBuffer, []rune(text)...)
 }
 
 func (m *outputModel) HandleKey(key string) (string, bool) {
@@ -81,17 +116,32 @@ func (m *outputModel) HandleKey(key string) (string, bool) {
 	return "", false
 }
 
+func (m *outputModel) EchoSubmittedInput(text string) {
+	if m.pending != "" {
+		m.lines = append(m.lines, outputLine{text: m.pending + text, isErr: m.pendingErr})
+		m.pending = ""
+		m.pendingErr = false
+		return
+	}
+	m.lines = append(m.lines, outputLine{text: "> " + text, isErr: false})
+}
+
 func (m outputModel) View() string {
 	var body []string
 	body = append(body, accentStyle.Render("Live Output")+"  "+mutedStyle.Render(m.status))
 
 	available := max(1, m.height-4)
+	visibleLines := make([]outputLine, 0, len(m.lines)+1)
+	visibleLines = append(visibleLines, m.lines...)
+	if m.pending != "" {
+		visibleLines = append(visibleLines, outputLine{text: m.pending, isErr: m.pendingErr})
+	}
 	start := 0
-	if len(m.lines) > available {
-		start = len(m.lines) - available
+	if len(visibleLines) > available {
+		start = len(visibleLines) - available
 	}
 
-	for _, line := range m.lines[start:] {
+	for _, line := range visibleLines[start:] {
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 		if line.isErr {
 			style = errorStyle
@@ -99,7 +149,7 @@ func (m outputModel) View() string {
 		body = append(body, style.Render(line.text))
 	}
 
-	if len(m.lines) == 0 {
+	if len(visibleLines) == 0 {
 		body = append(body, mutedStyle.Render("Output will appear here after the next run."))
 	}
 

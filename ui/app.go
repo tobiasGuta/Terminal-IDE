@@ -19,6 +19,7 @@ type screen int
 const (
 	screenWelcome screen = iota
 	screenPicker
+	screenNewFile
 	screenEditor
 )
 
@@ -37,6 +38,12 @@ type editorTab struct {
 	activeRunID   int
 }
 
+type tabHitbox struct {
+	index int
+	start int
+	end   int
+}
+
 type appModel struct {
 	screen       screen
 	width        int
@@ -48,6 +55,7 @@ type appModel struct {
 
 	welcome welcomeModel
 	picker  filepicker.Model
+	newFile newFileModel
 	runner  *runner.Manager
 	status  string
 	focus   string
@@ -60,6 +68,7 @@ func NewApp() tea.Model {
 		activeTab: -1,
 		welcome:   newWelcomeModel(),
 		picker:    filepicker.New("", filepicker.PickFile),
+		newFile:   newNewFileModel(pickerStartPath("")),
 		runner:    runner.New(),
 		status:    "Choose a file to begin.",
 		focus:     "editor",
@@ -142,6 +151,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.startRunForTab(idx, "Queued run...")
 		}
 		return m, nil
+
+	case tea.MouseMsg:
+		if m.screen == screenEditor && msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			return m, m.handleMouseClick(msg.X, msg.Y)
+		}
+		return m, nil
 	}
 
 	key, ok := msg.(tea.KeyMsg)
@@ -162,7 +177,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err := m.runner.SendInput(m.tabs[m.activeTab].activeRunID, submitted+"\n"); err != nil {
 					m.tabs[m.activeTab].output.Append(err.Error(), true)
 				} else {
-					m.tabs[m.activeTab].output.Append("> "+submitted, false)
+					m.tabs[m.activeTab].output.EchoSubmittedInput(submitted)
 				}
 				return m, nil
 			}
@@ -176,6 +191,38 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "ctrl+q":
 		m.runner.Stop()
 		return m, tea.Quit
+	case "ctrl+c":
+		if m.screen == screenEditor && m.hasActiveTab() {
+			var text string
+			if m.tabs[m.activeTab].output.InputFocused() {
+				text = m.tabs[m.activeTab].output.InputValue()
+			} else {
+				text = m.tabs[m.activeTab].editor.CurrentLine()
+			}
+			if err := writeClipboard(text); err != nil {
+				m.tabs[m.activeTab].status = err.Error()
+			} else {
+				m.tabs[m.activeTab].status = "Copied to clipboard"
+			}
+			return m, nil
+		}
+	case "ctrl+v":
+		if m.screen == screenEditor && m.hasActiveTab() {
+			text, err := readClipboard()
+			if err != nil {
+				m.tabs[m.activeTab].status = err.Error()
+				return m, nil
+			}
+			if m.tabs[m.activeTab].output.InputFocused() {
+				m.tabs[m.activeTab].output.PasteInput(text)
+				m.tabs[m.activeTab].status = "Pasted into live input"
+			} else {
+				m.tabs[m.activeTab].editor.PasteText(text)
+				m.tabs[m.activeTab].status = "Pasted into editor"
+				return m, scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
+			}
+			return m, nil
+		}
 	case "ctrl+l":
 		if m.screen == screenEditor && m.hasActiveTab() {
 			m.tabs[m.activeTab].output.SetInputFocus(true)
@@ -203,7 +250,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "esc":
-		if m.screen == screenEditor || m.screen == screenPicker {
+		if m.screen == screenEditor || m.screen == screenPicker || m.screen == screenNewFile {
 			m.screen = screenWelcome
 			m.status = "Returned to welcome menu."
 			m.runner.Stop()
@@ -243,13 +290,22 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.String() == "enter" {
 			switch m.welcome.Selected() {
 			case "Open File":
+				m.welcome.SetMessage("")
 				m.picker = filepicker.New(pickerStartPath(""), filepicker.PickFile)
 				m.picker.SetSize(m.width-6, m.height-6)
 				m.screen = screenPicker
 			case "Open Folder":
+				m.welcome.SetMessage("")
 				m.picker = filepicker.New(pickerStartPath(""), filepicker.PickDirectory)
 				m.picker.SetSize(m.width-6, m.height-6)
 				m.screen = screenPicker
+			case "Create New File":
+				m.welcome.SetMessage("")
+				m.newFile = newNewFileModel(m.defaultCreateDir())
+				m.newFile.SetSize(m.width, m.height)
+				m.screen = screenNewFile
+			case "Recent Files (Soon)":
+				m.welcome.SetMessage("Recent Files is not implemented yet.")
 			}
 		}
 		return m, cmd
@@ -257,6 +313,33 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenPicker:
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(msg)
+		return m, cmd
+
+	case screenNewFile:
+		var cmd tea.Cmd
+		m.newFile, cmd = m.newFile.Update(msg)
+		if key.String() == "enter" {
+			path, err := m.newFile.ValidatedPath()
+			if err != nil {
+				m.newFile.SetMessage(err.Error())
+				return m, nil
+			}
+			if _, err := os.Stat(path); err == nil {
+				m.newFile.SetMessage("file already exists")
+				return m, nil
+			}
+			if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+				m.newFile.SetMessage(err.Error())
+				return m, nil
+			}
+			tabIndex, err := m.openFile(path)
+			if err != nil {
+				m.newFile.SetMessage(err.Error())
+				return m, nil
+			}
+			m.tabs[tabIndex].status = fmt.Sprintf("Created %s", filepath.Base(path))
+			m.screen = screenEditor
+		}
 		return m, cmd
 
 	case screenEditor:
@@ -281,6 +364,8 @@ func (m *appModel) View() string {
 	case screenPicker:
 		card := activePanelStyle.Width(max(20, m.width-4)).Height(max(8, m.height-4)).Render(m.picker.View())
 		return appPaddingStyle.Render(card)
+	case screenNewFile:
+		return m.newFile.View()
 	case screenEditor:
 		if !m.hasActiveTab() {
 			return m.welcome.View()
@@ -307,7 +392,7 @@ func (m *appModel) View() string {
 		)
 		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
 		bottom := bottomStyle.Render(tab.output.View())
-		footer := mutedStyle.Render("ctrl+s save • ctrl+o open • ctrl+w close tab • shift+tab prev • tab or ctrl+] next • ctrl+l live input")
+		footer := mutedStyle.Render("ctrl+s save • ctrl+o open • ctrl+w close tab • shift+tab prev • tab or ctrl+] next • ctrl+c/cv clipboard • mouse focus")
 		return appPaddingStyle.Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom, footer))
 	default:
 		return ""
@@ -327,6 +412,7 @@ func (m *appModel) resize() {
 
 	m.welcome.SetSize(m.width, m.height)
 	m.picker.SetSize(max(10, m.width-6), max(6, m.height-6))
+	m.newFile.SetSize(m.width, m.height)
 	for i := range m.tabs {
 		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-2))
 		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
@@ -383,7 +469,7 @@ func (m *appModel) closeActiveTab() {
 	}
 
 	if m.tabs[m.activeTab].activeRunID != 0 {
-		m.runner.Stop()
+		m.runner.StopRun(m.tabs[m.activeTab].activeRunID)
 	}
 
 	m.tabs = append(m.tabs[:m.activeTab], m.tabs[m.activeTab+1:]...)
@@ -426,12 +512,7 @@ func (m *appModel) renderTabBar(width int) string {
 	}
 
 	var rendered []string
-	for i, tab := range m.tabs {
-		label := filepath.Base(tab.path)
-		if tab.editor.Dirty() {
-			label += " *"
-		}
-		label = truncateLabel(label, 20)
+	for i, item := range m.tabItems() {
 		style := lipgloss.NewStyle().
 			Padding(0, 1).
 			MarginRight(1).
@@ -440,7 +521,7 @@ func (m *appModel) renderTabBar(width int) string {
 		if i == m.activeTab {
 			style = style.Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15")).Bold(true)
 		}
-		rendered = append(rendered, style.Render(label))
+		rendered = append(rendered, style.Render(item.label))
 	}
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Left, rendered...)
@@ -448,6 +529,100 @@ func (m *appModel) renderTabBar(width int) string {
 		bar = lipgloss.NewStyle().MaxWidth(width).Render(bar)
 	}
 	return bar
+}
+
+func (m *appModel) tabItems() []struct {
+	label string
+	index int
+} {
+	items := make([]struct {
+		label string
+		index int
+	}, 0, len(m.tabs))
+	for i, tab := range m.tabs {
+		label := filepath.Base(tab.path)
+		if tab.editor.Dirty() {
+			label += " *"
+		}
+		items = append(items, struct {
+			label string
+			index int
+		}{
+			label: truncateLabel(label, 20),
+			index: i,
+		})
+	}
+	return items
+}
+
+func (m *appModel) tabHitboxes() []tabHitbox {
+	items := m.tabItems()
+	hitboxes := make([]tabHitbox, 0, len(items))
+	offset := 0
+	for _, item := range items {
+		// Padding(0,1) + MarginRight(1)
+		width := lipgloss.Width(item.label) + 3
+		hitboxes = append(hitboxes, tabHitbox{
+			index: item.index,
+			start: offset,
+			end:   offset + width,
+		})
+		offset += width
+	}
+	return hitboxes
+}
+
+func (m *appModel) handleMouseClick(x, y int) tea.Cmd {
+	if !m.hasActiveTab() {
+		return nil
+	}
+
+	const (
+		appPadX   = 2
+		appPadY   = 1
+		border    = 1
+		panelPadX = 1
+	)
+
+	panelX := appPadX
+	panelY := appPadY
+	panelWidth := max(20, m.width-4)
+	topHeight := max(4, m.editorHeight) + (border * 2)
+	bottomY := panelY + topHeight
+	bottomHeight := max(3, m.outputHeight) + (border * 2)
+
+	if y >= panelY && y < panelY+topHeight && x >= panelX && x < panelX+panelWidth {
+		tabBarY := panelY
+		tabBarX := panelX + border + panelPadX
+		if y >= tabBarY && y <= tabBarY+1 {
+			relativeX := x - tabBarX
+			for _, hitbox := range m.tabHitboxes() {
+				if (relativeX >= hitbox.start && relativeX < hitbox.end) ||
+					(relativeX-1 >= hitbox.start && relativeX-1 < hitbox.end) {
+					m.activateTab(hitbox.index)
+					return nil
+				}
+			}
+		}
+
+		m.tabs[m.activeTab].output.SetInputFocus(false)
+		m.focus = "editor"
+
+		contentX := panelX + border + panelPadX
+		editorBodyY := panelY + border + 4
+		if y >= editorBodyY {
+			m.tabs[m.activeTab].editor.SetCursorFromView(y-editorBodyY, x-contentX)
+		}
+		return nil
+	}
+
+	if y >= bottomY && y < bottomY+bottomHeight && x >= panelX && x < panelX+panelWidth {
+		m.tabs[m.activeTab].output.SetInputFocus(true)
+		m.focus = "output"
+		return nil
+	}
+
+	return nil
 }
 
 func truncateLabel(label string, maxWidth int) string {
@@ -507,6 +682,13 @@ func pickerStartPath(path string) string {
 		return abs
 	}
 	return path
+}
+
+func (m *appModel) defaultCreateDir() string {
+	if m.hasActiveTab() {
+		return filepath.Dir(m.tabs[m.activeTab].path)
+	}
+	return pickerStartPath("")
 }
 
 func max(a, b int) int {
