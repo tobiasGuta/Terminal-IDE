@@ -2,6 +2,9 @@
 
 A terminal-based IDE written in Go using Bubble Tea, Lip Gloss, and Chroma. It includes a split editor/output layout, live execution for Python and Go, Python execution tracing, live stdin support, and optional AI-powered error explanations and hints.
 
+<img width="1415" height="711" alt="image" src="https://github.com/user-attachments/assets/a828455d-fb1a-4adc-b410-0aa377cf91ba" />
+
+
 ## Features
 
 - Welcome screen with keyboard-driven `Open File`, `Open Folder`, and `Create New File`
@@ -230,3 +233,8 @@ ctrl + E
 
 <img width="1916" height="966" alt="image" src="https://github.com/user-attachments/assets/cb8005d2-4064-4dad-980f-aa82bfb38f8b" />
 
+----
+
+### Select Theme
+
+<img width="1904" height="955" alt="image" src="https://github.com/user-attachments/assets/086b0f97-77df-4570-a58d-11de2688f224" />

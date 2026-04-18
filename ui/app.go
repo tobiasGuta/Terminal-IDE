@@ -26,6 +26,7 @@ const (
 	screenNewFile
 	screenInterpreterPicker
 	screenModelPicker
+	screenThemePicker
 	screenEditor
 )
 
@@ -102,9 +103,12 @@ type appModel struct {
 	newFile            newFileModel
 	interpreterPicker  interpreterPickerModel
 	modelPicker        modelPickerModel
+	themePicker        themePickerModel
 	runner             *runner.Manager
 	aiClient           *ai.Client
 	selectedAIModel    string
+	selectedTheme      string
+	customThemeLoaded  bool
 	aiLoading          bool
 	aiThinkingFrame    int
 	aiThinkingTab      int
@@ -118,6 +122,9 @@ type appModel struct {
 func NewApp() tea.Model {
 	interpreters, _ := runner.DiscoverPythonInterpreters()
 	aiClient := ai.NewClient(os.Getenv("OPENAI_API_KEY"), os.Getenv("GEMINI_API_KEY"), "")
+	registerBuiltInThemeAliases()
+	customThemeLoaded := loadCustomTheme()
+	editor.SetTheme("monokai")
 	return &appModel{
 		screen:             screenWelcome,
 		prevScreen:         screenWelcome,
@@ -127,9 +134,12 @@ func NewApp() tea.Model {
 		newFile:            newNewFileModel(pickerStartPath("")),
 		interpreterPicker:  newInterpreterPickerModel(nil, ""),
 		modelPicker:        newModelPickerModel(nil, ""),
+		themePicker:        newThemePickerModel(nil, ""),
 		runner:             runner.New(),
 		aiClient:           aiClient,
 		selectedAIModel:    aiClient.Model(),
+		selectedTheme:      "monokai",
+		customThemeLoaded:  customThemeLoaded,
 		aiThinkingTab:      -1,
 		status:             "Choose a file to begin.",
 		focus:              "editor",
@@ -327,6 +337,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.modelPicker, cmd = m.modelPicker.Update(msg)
 			return m, cmd
+		case screenThemePicker:
+			var cmd tea.Cmd
+			m.themePicker, cmd = m.themePicker.Update(msg)
+			return m, cmd
 		case screenEditor:
 			if m.hasActiveTab() {
 				var cmd tea.Cmd
@@ -414,6 +428,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+	case "alt+t":
+		if m.screen == screenEditor {
+			m.openThemePicker()
+			return m, nil
+		}
 	case "ctrl+c":
 		if m.screen == screenEditor && m.hasActiveTab() {
 			var text string
@@ -494,7 +513,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		switch m.screen {
-		case screenPicker, screenNewFile, screenInterpreterPicker, screenModelPicker:
+		case screenPicker, screenNewFile, screenInterpreterPicker, screenModelPicker, screenThemePicker:
 			m.screen = m.popScreen()
 			if m.screen == screenEditor && m.hasActiveTab() {
 				m.tabs[m.activeTab].output.SetInputFocus(false)
@@ -639,6 +658,21 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
+	case screenThemePicker:
+		var cmd tea.Cmd
+		m.themePicker, cmd = m.themePicker.Update(msg)
+		if key.String() == "enter" {
+			selected := m.themePicker.Selected()
+			if selected != "" {
+				m.selectedTheme = selected
+				editor.SetTheme(selected)
+				m.status = fmt.Sprintf("Theme set to %s", selected)
+			}
+			m.screen = m.popScreen()
+			return m, nil
+		}
+		return m, cmd
+
 	case screenEditor:
 		if m.hasActiveTab() {
 			var cmd tea.Cmd
@@ -667,6 +701,8 @@ func (m *appModel) View() string {
 		return m.interpreterPicker.View()
 	case screenModelPicker:
 		return m.modelPicker.View()
+	case screenThemePicker:
+		return m.themePicker.View()
 	case screenEditor:
 		if !m.hasActiveTab() {
 			return m.welcome.View()
@@ -709,7 +745,7 @@ func (m *appModel) View() string {
 		)
 		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
 		bottom := bottomStyle.Render(tab.output.View())
-		footerLeft := "ctrl+s save • ctrl+o open • ctrl+w close tab • ctrl+e explain • ctrl+h hint • alt+m model • shift+tab prev • tab or ctrl+] next • ctrl+r interpreter • ctrl+c/cv clipboard • mouse focus"
+		footerLeft := "ctrl+s save • ctrl+o open • ctrl+w close tab • ctrl+e explain • ctrl+h hint • alt+m model • alt+t theme • shift+tab prev • tab or ctrl+] next • ctrl+r interpreter • ctrl+c/cv clipboard • mouse focus"
 		footer := renderFooter(panelWidth, footerLeft, m.selectedAIModel, m.aiStatusText())
 		return appPaddingStyle.Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom, footer))
 	default:
@@ -733,6 +769,7 @@ func (m *appModel) resize() {
 	m.newFile.SetSize(m.width, m.height)
 	m.interpreterPicker.SetSize(m.width, m.height)
 	m.modelPicker.SetSize(m.width, m.height)
+	m.themePicker.SetSize(m.width, m.height)
 	for i := range m.tabs {
 		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-editorChromeRows))
 		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
@@ -1124,6 +1161,14 @@ func (m *appModel) openModelPicker() bool {
 	m.pushScreen(m.screen)
 	m.screen = screenModelPicker
 	return true
+}
+
+func (m *appModel) openThemePicker() {
+	options := availableEditorThemes(m.customThemeLoaded)
+	m.themePicker = newThemePickerModel(options, m.selectedTheme)
+	m.themePicker.SetSize(m.width, m.height)
+	m.pushScreen(m.screen)
+	m.screen = screenThemePicker
 }
 
 func (m *appModel) startAIErrorExplanation(index int) tea.Cmd {

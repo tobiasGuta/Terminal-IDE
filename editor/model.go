@@ -6,11 +6,14 @@ import (
 
 	"github.com/alecthomas/chroma"
 	"github.com/alecthomas/chroma/lexers"
+	"github.com/alecthomas/chroma/styles"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type ChangedMsg struct{}
+
+var activeThemeName = "monokai"
 
 type Model struct {
 	path        string
@@ -33,6 +36,14 @@ type Model struct {
 
 func New() Model {
 	return Model{lines: []string{""}}
+}
+
+func SetTheme(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "monokai"
+	}
+	activeThemeName = name
 }
 
 func (m *Model) SetSize(width, height int) {
@@ -604,22 +615,27 @@ func (m Model) selectionForLine(lineIndex int) (int, int, bool) {
 }
 
 func styleForToken(tokenType chroma.TokenType) lipgloss.Style {
-	switch {
-	case tokenType.InCategory(chroma.Keyword):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
-	case tokenType.InCategory(chroma.String):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("221"))
-	case tokenType.InCategory(chroma.Comment):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("108")).Italic(true)
-	case tokenType.InCategory(chroma.Number):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	case tokenType.InCategory(chroma.Operator):
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	case tokenType == chroma.NameFunction || tokenType == chroma.NameBuiltin:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
-	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	return lipglossStyleForEntry(styles.Get(activeThemeName).Get(tokenType))
+}
+
+func lipglossStyleForEntry(entry chroma.StyleEntry) lipgloss.Style {
+	style := lipgloss.NewStyle()
+	if entry.Colour.IsSet() {
+		style = style.Foreground(lipgloss.Color(entry.Colour.String()))
 	}
+	if entry.Background.IsSet() {
+		style = style.Background(lipgloss.Color(entry.Background.String()))
+	}
+	if entry.Bold == chroma.Yes {
+		style = style.Bold(true)
+	}
+	if entry.Italic == chroma.Yes {
+		style = style.Italic(true)
+	}
+	if entry.Underline == chroma.Yes {
+		style = style.Underline(true)
+	}
+	return style
 }
 
 func min(a, b int) int {
