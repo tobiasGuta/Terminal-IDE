@@ -1,9 +1,0 @@
-# test log
-getenv GOTMPDIR
-getenv TMPDIR
-open /tmp/TestFilePickerDoesNotListParentOutsideRoot804791862/001
-open /tmp
-getenv GOTMPDIR
-getenv TMPDIR
-open /tmp/TestFilePickerUnrootedAllowsParentTraversal1275015553/001
-open /tmp

@@ -1,5 +1,0 @@
-# test log
-getenv GOTMPDIR
-getenv TMPDIR
-open /tmp/TestFilePickerDoesNotListParentOutsideRoot3233956420/001
-open /tmp
