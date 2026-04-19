@@ -231,40 +231,4 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 
 ## Screenshots
 
-<img width="1922" height="960" alt="Screenshot From 2026-04-17 11-49-44" src="https://github.com/user-attachments/assets/7c133d64-ecd7-473b-be9b-3fbded5d3bd5" />
 
-----
-
-<img width="1922" height="960" alt="Screenshot From 2026-04-17 11-49-50" src="https://github.com/user-attachments/assets/0e7505ac-18c4-4c29-ac65-a017e06067f8" />
-
-----
-
-<img width="1922" height="960" alt="Screenshot From 2026-04-17 11-50-00" src="https://github.com/user-attachments/assets/4a68b964-f9f3-4bbb-b860-2632b9bd3a4d" />
-
-----
-
-<img width="1922" height="960" alt="Screenshot From 2026-04-17 11-50-08" src="https://github.com/user-attachments/assets/1825cca6-36f5-4e7e-a409-18bc6d3ac4b4" />
-
-----
-
-https://github.com/user-attachments/assets/09de9aaa-8242-43d1-b2f9-c98f8a584418
-
-----
-
-### AI
-
-ctrl + h
-
-https://github.com/user-attachments/assets/65b0ebc9-f699-4bb4-9631-ec69534666ab
-
-----
-
-ctrl + E
-
-<img width="1916" height="966" alt="image" src="https://github.com/user-attachments/assets/cb8005d2-4064-4dad-980f-aa82bfb38f8b" />
-
-----
-
-### Select Theme
-
-<img width="1904" height="955" alt="image" src="https://github.com/user-attachments/assets/086b0f97-77df-4570-a58d-11de2688f224" />
