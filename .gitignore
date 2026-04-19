@@ -2,3 +2,4 @@ ide
 /ide
 /.ide
 .gocache
+.codex
