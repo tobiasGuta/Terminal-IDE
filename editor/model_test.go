@@ -113,7 +113,8 @@ func TestFindNextHighlightsMatchedText(t *testing.T) {
 	m.LoadFile("sample.py", "alpha beta alpha")
 	m.SetSize(80, 20)
 
-	if !m.FindNext("beta", true) {
+	found, _ := m.FindNext("beta", true)
+	if !found {
 		t.Fatalf("expected to find beta")
 	}
 	if got := m.SelectedText(); got != "beta" {
@@ -125,5 +126,40 @@ func TestFindNextHighlightsMatchedText(t *testing.T) {
 	}
 	if start != 6 || end != 10 {
 		t.Fatalf("expected selection range 6..10, got %d..%d", start, end)
+	}
+}
+
+func TestBackspaceDoesNotDeleteNonEmptyPair(t *testing.T) {
+	m := New()
+	m.LoadFile("sample.py", "(a)")
+	m.SetSize(80, 20)
+	m.cursorRow = 0
+	m.cursorCol = 2
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := updated.Content(); got != "()" {
+		t.Fatalf("expected only inner character to be deleted, got %q", got)
+	}
+	if updated.cursorCol != 1 {
+		t.Fatalf("expected cursor to move back by one, got %d", updated.cursorCol)
+	}
+}
+
+func TestFindNextReportsWrap(t *testing.T) {
+	m := New()
+	m.LoadFile("sample.py", "alpha\nbeta\nalpha")
+	m.SetSize(80, 20)
+	m.cursorRow = 2
+	m.cursorCol = len("alpha")
+
+	found, wrapped := m.FindNext("beta", true)
+	if !found {
+		t.Fatalf("expected to find beta after wrapping")
+	}
+	if !wrapped {
+		t.Fatalf("expected wrapped search to report wrap")
+	}
+	if got := m.SelectedText(); got != "beta" {
+		t.Fatalf("expected beta to be selected after wrap, got %q", got)
 	}
 }

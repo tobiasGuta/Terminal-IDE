@@ -19,6 +19,7 @@ type outputModel struct {
 	pending      string
 	pendingErr   bool
 	aiStreaming  bool
+	colOffset    int
 	status       string
 	inputBuffer  []rune
 	inputFocus   bool
@@ -57,6 +58,7 @@ func (m *outputModel) Reset(status string) {
 	m.lines = nil
 	m.pending = ""
 	m.pendingErr = false
+	m.colOffset = 0
 	m.status = status
 	m.ClearSelection()
 }
@@ -246,7 +248,7 @@ func (m *outputModel) BeginSelection(viewRow, col int) {
 		return
 	}
 	lineIndex := start + viewRow
-	col = clamp(col, 0, len([]rune(lines[viewRow].text)))
+	col = clamp(col+m.colOffset, 0, len([]rune(lines[viewRow].text)))
 	m.selecting = true
 	m.selStartLine, m.selStartCol = lineIndex, col
 	m.selEndLine, m.selEndCol = lineIndex, col
@@ -267,7 +269,7 @@ func (m *outputModel) UpdateSelection(viewRow, col int) {
 		viewRow = len(lines) - 1
 	}
 	lineIndex := start + viewRow
-	col = clamp(col, 0, len([]rune(lines[viewRow].text)))
+	col = clamp(col+m.colOffset, 0, len([]rune(lines[viewRow].text)))
 	m.selEndLine, m.selEndCol = lineIndex, col
 }
 
@@ -389,27 +391,54 @@ func (m outputModel) renderOutputLine(absIndex int, line outputLine) string {
 	} else if line.colorCode != "" {
 		base = lipgloss.NewStyle().Foreground(lipgloss.Color(line.colorCode)).Bold(true)
 	}
+	runes := []rune(line.text)
+	if m.colOffset > len(runes) {
+		runes = nil
+	} else {
+		runes = runes[m.colOffset:]
+	}
+	width := max(1, m.width)
+	if len(runes) > width {
+		runes = runes[:width]
+	}
+	visibleText := string(runes)
 	if !m.HasSelection() {
-		return base.Render(line.text)
+		return base.Render(visibleText)
 	}
 	startLine, startCol, endLine, endCol := normalizedSelection(m.selStartLine, m.selStartCol, m.selEndLine, m.selEndCol)
 	if absIndex < startLine || absIndex > endLine {
-		return base.Render(line.text)
+		return base.Render(visibleText)
 	}
-	runes := []rune(line.text)
+	fullRunes := []rune(line.text)
 	from := 0
-	to := len(runes)
+	to := len(fullRunes)
 	if absIndex == startLine {
-		from = clamp(startCol, 0, len(runes))
+		from = clamp(startCol, 0, len(fullRunes))
 	}
 	if absIndex == endLine {
-		to = clamp(endCol, 0, len(runes))
+		to = clamp(endCol, 0, len(fullRunes))
 	}
 	if from > to {
 		from = to
 	}
+	visibleStart := m.colOffset
+	visibleEnd := m.colOffset + width
+	if visibleEnd > len(fullRunes) {
+		visibleEnd = len(fullRunes)
+	}
+	if visibleStart > len(fullRunes) {
+		visibleStart = len(fullRunes)
+	}
+	renderFrom := max(from, visibleStart)
+	renderTo := min(to, visibleEnd)
+	if renderFrom > renderTo {
+		renderFrom = renderTo
+	}
+	prefix := string(fullRunes[visibleStart:renderFrom])
+	highlight := string(fullRunes[renderFrom:renderTo])
+	suffix := string(fullRunes[renderTo:visibleEnd])
 	selected := lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15"))
-	return base.Render(string(runes[:from])) + selected.Render(string(runes[from:to])) + base.Render(string(runes[to:]))
+	return base.Render(prefix) + selected.Render(highlight) + base.Render(suffix)
 }
 
 func normalizedSelection(startLine, startCol, endLine, endCol int) (int, int, int, int) {
@@ -437,4 +466,14 @@ func (m *outputModel) trimScrollback() {
 	m.lines = append([]outputLine{}, m.lines[drop:]...)
 	m.selStartLine = max(0, m.selStartLine-drop)
 	m.selEndLine = max(0, m.selEndLine-drop)
+}
+
+func (m *outputModel) ScrollHorizontal(delta int) {
+	if delta == 0 {
+		return
+	}
+	m.colOffset += delta
+	if m.colOffset < 0 {
+		m.colOffset = 0
+	}
 }

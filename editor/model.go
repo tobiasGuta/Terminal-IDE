@@ -581,57 +581,71 @@ func (m *Model) Redo() bool {
 	return true
 }
 
-func (m *Model) FindNext(query string, forward bool) bool {
+func (m *Model) FindNext(query string, forward bool) (bool, bool) {
+	return m.findFrom(query, forward, m.cursorRow, m.cursorCol)
+}
+
+func (m *Model) PreviewFind(query string) (bool, bool) {
+	row, col := m.cursorRow, m.cursorCol
+	if m.HasSelection() {
+		row, col, _, _ = normalizeSelection(m.selStartRow, m.selStartCol, m.selEndRow, m.selEndCol)
+	}
+	return m.findFrom(query, true, row, col)
+}
+
+func (m *Model) findFrom(query string, forward bool, anchorRow, anchorCol int) (bool, bool) {
 	queryRunes := []rune(query)
 	if len(queryRunes) == 0 || len(m.lines) == 0 {
-		return false
+		return false, false
 	}
+	anchorRow = clamp(anchorRow, 0, len(m.lines)-1)
+	anchorCol = clamp(anchorCol, 0, runeCount(m.lines[anchorRow]))
 
 	if forward {
-		for row := m.cursorRow; row < len(m.lines); row++ {
+		for row := anchorRow; row < len(m.lines); row++ {
 			start := 0
-			if row == m.cursorRow {
-				start = min(runeCount(m.lines[row]), m.cursorCol)
+			if row == anchorRow {
+				start = min(runeCount(m.lines[row]), anchorCol)
 			}
 			if col := findInRunes([]rune(m.lines[row]), queryRunes, start, true); col >= 0 {
 				m.applyMatch(row, col, len(queryRunes))
-				return true
+				return true, false
 			}
 		}
-		for row := 0; row <= m.cursorRow && row < len(m.lines); row++ {
+		for row := 0; row <= anchorRow && row < len(m.lines); row++ {
 			end := runeCount(m.lines[row])
-			if row == m.cursorRow {
-				end = min(end, m.cursorCol)
+			if row == anchorRow {
+				end = min(end, anchorCol)
 			}
 			if col := findInRunes([]rune(m.lines[row]), queryRunes, end, false); col >= 0 {
 				m.applyMatch(row, col, len(queryRunes))
-				return true
+				return true, true
 			}
 		}
-		return false
+		return false, false
 	}
 
-	for row := m.cursorRow; row >= 0; row-- {
+	for row := anchorRow; row >= 0; row-- {
 		end := runeCount(m.lines[row])
-		if row == m.cursorRow {
-			end = min(end, m.cursorCol)
+		if row == anchorRow {
+			end = min(end, anchorCol)
 		}
 		if col := findInRunes([]rune(m.lines[row]), queryRunes, end, false); col >= 0 {
 			m.applyMatch(row, col, len(queryRunes))
-			return true
+			return true, false
 		}
 	}
-	for row := len(m.lines) - 1; row >= m.cursorRow; row-- {
+	for row := len(m.lines) - 1; row >= anchorRow; row-- {
 		start := 0
-		if row == m.cursorRow {
-			start = min(runeCount(m.lines[row]), m.cursorCol)
+		if row == anchorRow {
+			start = min(runeCount(m.lines[row]), anchorCol)
 		}
 		if col := findInRunes([]rune(m.lines[row]), queryRunes, start, true); col >= 0 {
 			m.applyMatch(row, col, len(queryRunes))
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, false
 }
 
 func (m *Model) ReplaceSelection(find, replace string) bool {

@@ -44,17 +44,20 @@ func (m *appModel) handlePromptKey(key tea.KeyMsg) (bool, tea.Cmd) {
 		if len(m.prompt.fields) > 0 {
 			m.prompt.activeField = (m.prompt.activeField + 1) % len(m.prompt.fields)
 		}
+		m.refreshPromptPreview()
 		return true, nil
 	case "shift+tab":
 		if len(m.prompt.fields) > 0 {
 			m.prompt.activeField = (m.prompt.activeField - 1 + len(m.prompt.fields)) % len(m.prompt.fields)
 		}
+		m.refreshPromptPreview()
 		return true, nil
 	case "backspace":
 		field := &m.prompt.fields[m.prompt.activeField]
 		if len(field.value) > 0 {
 			field.value = field.value[:len(field.value)-1]
 		}
+		m.refreshPromptPreview()
 		return true, nil
 	case "enter":
 		return true, m.submitPrompt(true, false)
@@ -65,6 +68,7 @@ func (m *appModel) handlePromptKey(key tea.KeyMsg) (bool, tea.Cmd) {
 	}
 	if key.Type == tea.KeyRunes || key.Type == tea.KeySpace {
 		m.appendToPromptField(key.String())
+		m.refreshPromptPreview()
 		return true, nil
 	}
 	return false, nil
@@ -90,19 +94,15 @@ func (m *appModel) submitPrompt(forward, replaceAll bool) tea.Cmd {
 		}
 		if replace != "" && m.tabs[m.activeTab].editor.ReplaceSelection(find, replace) {
 			cmd := scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
-			if m.tabs[m.activeTab].editor.FindNext(find, true) {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Replaced %q and moved to next match", find)
+			if found, wrapped := m.tabs[m.activeTab].editor.FindNext(find, true); found {
+				m.tabs[m.activeTab].status = formatFindStatus(find, true, wrapped, "Replaced %q and moved to next match", "Replaced %q and wrapped to next match")
 			} else {
 				m.tabs[m.activeTab].status = fmt.Sprintf("Replaced final %q", find)
 			}
 			return cmd
 		}
-		if m.tabs[m.activeTab].editor.FindNext(find, forward) {
-			if forward {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Found next %q", find)
-			} else {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Found previous %q", find)
-			}
+		if found, wrapped := m.tabs[m.activeTab].editor.FindNext(find, forward); found {
+			m.tabs[m.activeTab].status = formatFindStatus(find, forward, wrapped, "", "")
 			return nil
 		}
 		m.tabs[m.activeTab].status = fmt.Sprintf("No matches for %q", find)
@@ -132,6 +132,41 @@ func (m *appModel) appendToPromptField(text string) {
 		return
 	}
 	m.prompt.fields[m.prompt.activeField].value = append(m.prompt.fields[m.prompt.activeField].value, []rune(text)...)
+}
+
+func (m *appModel) refreshPromptPreview() {
+	if m.prompt.mode != promptFind || !m.hasActiveTab() || m.prompt.activeField != 0 || len(m.prompt.fields) == 0 {
+		return
+	}
+	find := strings.TrimSpace(string(m.prompt.fields[0].value))
+	if find == "" {
+		m.tabs[m.activeTab].status = "Type to preview matches"
+		return
+	}
+	if found, wrapped := m.tabs[m.activeTab].editor.PreviewFind(find); found {
+		m.tabs[m.activeTab].status = formatFindStatus(find, true, wrapped, "Previewing %q", "Previewing %q (wrapped)")
+		return
+	}
+	m.tabs[m.activeTab].status = fmt.Sprintf("No matches for %q", find)
+}
+
+func formatFindStatus(find string, forward, wrapped bool, forwardFormat, wrappedForwardFormat string) string {
+	if forwardFormat == "" {
+		forwardFormat = "Found next %q"
+	}
+	if wrappedForwardFormat == "" {
+		wrappedForwardFormat = "Found next %q (wrapped)"
+	}
+	if forward {
+		if wrapped {
+			return fmt.Sprintf(wrappedForwardFormat, find)
+		}
+		return fmt.Sprintf(forwardFormat, find)
+	}
+	if wrapped {
+		return fmt.Sprintf("Found previous %q (wrapped)", find)
+	}
+	return fmt.Sprintf("Found previous %q", find)
 }
 
 func (m *appModel) renderPrompt(width int) string {

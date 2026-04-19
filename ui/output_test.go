@@ -96,3 +96,17 @@ func TestOutputModelStderrTextIncludesPendingError(t *testing.T) {
 		t.Fatalf("expected pending stderr to be included, got %q", got)
 	}
 }
+
+func TestOutputModelHorizontalScrollChangesVisibleSlice(t *testing.T) {
+	m := newOutputModel()
+	m.SetSize(8, 5)
+	m.Append("abcdefghijklmnop\n", false)
+
+	if got := m.renderOutputLine(0, m.lines[0]); got != "abcdefgh" {
+		t.Fatalf("expected initial visible slice, got %q", got)
+	}
+	m.ScrollHorizontal(4)
+	if got := m.renderOutputLine(0, m.lines[0]); got != "efghijkl" {
+		t.Fatalf("expected scrolled visible slice, got %q", got)
+	}
+}

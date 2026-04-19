@@ -416,6 +416,20 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.screen == screenEditor && m.hasActiveTab() && m.focus == "output" && !m.tabs[m.activeTab].output.InputFocused() {
+		switch key.String() {
+		case "left", "alt+left":
+			m.tabs[m.activeTab].output.ScrollHorizontal(-4)
+			return m, nil
+		case "right", "alt+right":
+			m.tabs[m.activeTab].output.ScrollHorizontal(4)
+			return m, nil
+		case "home":
+			m.tabs[m.activeTab].output.ScrollHorizontal(-1 << 20)
+			return m, nil
+		}
+	}
+
 	switch key.String() {
 	case "ctrl+q":
 		m.stopAllRuns()

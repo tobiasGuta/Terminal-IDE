@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -100,6 +101,53 @@ func TestMouseClickMovesEditorCursor(t *testing.T) {
 	m.handleMouseClick(m.layout.editorX+6, m.layout.editorBodyY+1)
 	if line := m.tabs[m.activeTab].editor.CurrentCursorLine(); line != 2 {
 		t.Fatalf("expected cursor line 2 after click, got %d", line)
+	}
+}
+
+func TestFindPromptPreviewsMatchWhileTyping(t *testing.T) {
+	m := NewApp().(*appModel)
+	m.width = 120
+	m.height = 40
+	m.resize()
+
+	path := writeTempFile(t, t.TempDir(), "search.py", "alpha beta gamma\n")
+	if _, err := m.openFile(path); err != nil {
+		t.Fatalf("openFile failed: %v", err)
+	}
+
+	m.openFindPrompt()
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app := model.(*appModel)
+	if got := app.tabs[app.activeTab].editor.SelectedText(); got != "b" {
+		t.Fatalf("expected preview selection for typed query, got %q", got)
+	}
+	if !strings.Contains(app.tabs[app.activeTab].status, "Previewing") {
+		t.Fatalf("expected preview status, got %q", app.tabs[app.activeTab].status)
+	}
+}
+
+func TestFindPromptReportsWrappedSearch(t *testing.T) {
+	m := NewApp().(*appModel)
+	m.width = 120
+	m.height = 40
+	m.resize()
+
+	path := writeTempFile(t, t.TempDir(), "wrap.py", "alpha\nbeta\nalpha\n")
+	idx, err := m.openFile(path)
+	if err != nil {
+		t.Fatalf("openFile failed: %v", err)
+	}
+	m.tabs[idx].editor.JumpToLine(3)
+	m.tabs[idx].editor.SetSize(80, 20)
+	m.openFindPrompt()
+	m.prompt.fields[0].value = []rune("beta")
+
+	cmd := m.submitPrompt(true, false)
+	if cmd != nil {
+		t.Fatalf("expected find prompt submit not to schedule command")
+	}
+	if !strings.Contains(m.tabs[idx].status, "wrapped") {
+		t.Fatalf("expected wrapped status, got %q", m.tabs[idx].status)
 	}
 }
 
