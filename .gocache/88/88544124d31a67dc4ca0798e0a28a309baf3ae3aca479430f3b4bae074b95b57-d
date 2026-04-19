@@ -1,0 +1,15 @@
+./app.go
+./clipboard.go
+./commandpalette.go
+./config.go
+./git.go
+./interpreterpicker.go
+./modelpicker.go
+./newfile.go
+./output.go
+./sidebar.go
+./styles.go
+./theme.go
+./themepicker.go
+./welcome.go
+./config_test.go

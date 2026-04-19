@@ -92,7 +92,7 @@ func (m interpreterPickerModel) View() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, mutedStyle.Render("↑/↓ move • enter select • esc cancel"))
+	lines = append(lines, mutedStyle.Render("esc back • enter select • ↑↓ navigate"))
 
 	card := activePanelStyle.Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, card)

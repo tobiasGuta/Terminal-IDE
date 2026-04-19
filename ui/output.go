@@ -12,10 +12,13 @@ type outputLine struct {
 	colorCode string
 }
 
+const maxOutputScrollbackLines = 5000
+
 type outputModel struct {
 	lines        []outputLine
 	pending      string
 	pendingErr   bool
+	aiStreaming  bool
 	status       string
 	inputBuffer  []rune
 	inputFocus   bool
@@ -82,6 +85,7 @@ func (m *outputModel) Append(text string, isErr bool) {
 		m.pending = ""
 		m.pendingErr = isErr
 		m.lines = append(m.lines, outputLine{text: line, isErr: isErr})
+		m.trimScrollback()
 	}
 }
 
@@ -100,13 +104,61 @@ func (m *outputModel) AppendAIBlock(header, headerColor, content string) {
 		text:      "── " + header + " ──",
 		colorCode: headerColor,
 	})
+	m.trimScrollback()
 	for _, line := range strings.Split(content, "\n") {
 		m.lines = append(m.lines, outputLine{text: line})
+		m.trimScrollback()
 	}
+}
+
+func (m *outputModel) StartAIBlock(header, headerColor string) {
+	if m.pending != "" {
+		m.lines = append(m.lines, outputLine{text: m.pending, isErr: m.pendingErr})
+		m.pending = ""
+		m.pendingErr = false
+	}
+	m.aiStreaming = true
+	m.lines = append(m.lines, outputLine{
+		text:      "── " + header + " ──",
+		colorCode: headerColor,
+	})
+	m.lines = append(m.lines, outputLine{})
+	m.trimScrollback()
+}
+
+func (m *outputModel) AppendAIChunk(chunk string) {
+	if chunk == "" {
+		return
+	}
+	if !m.aiStreaming {
+		m.StartAIBlock("AI Response", "14")
+	}
+	if len(m.lines) == 0 {
+		m.lines = append(m.lines, outputLine{})
+	}
+	last := &m.lines[len(m.lines)-1]
+	parts := strings.Split(strings.ReplaceAll(chunk, "\r\n", "\n"), "\n")
+	for i, part := range parts {
+		if i == 0 {
+			last.text += part
+			continue
+		}
+		m.lines = append(m.lines, outputLine{text: part})
+		last = &m.lines[len(m.lines)-1]
+	}
+	m.trimScrollback()
+}
+
+func (m *outputModel) FinishAIBlock() {
+	m.aiStreaming = false
 }
 
 func (m *outputModel) SetStatus(status string) {
 	m.status = status
+}
+
+func (m outputModel) Status() string {
+	return m.status
 }
 
 func (m *outputModel) SetInputFocus(focused bool) {
@@ -180,9 +232,11 @@ func (m *outputModel) EchoSubmittedInput(text string) {
 		m.lines = append(m.lines, outputLine{text: m.pending + text, isErr: m.pendingErr})
 		m.pending = ""
 		m.pendingErr = false
+		m.trimScrollback()
 		return
 	}
 	m.lines = append(m.lines, outputLine{text: "> " + text, isErr: false})
+	m.trimScrollback()
 }
 
 func (m *outputModel) BeginSelection(viewRow, col int) {
@@ -373,4 +427,14 @@ func clamp(v, low, high int) int {
 		return high
 	}
 	return v
+}
+
+func (m *outputModel) trimScrollback() {
+	if len(m.lines) <= maxOutputScrollbackLines {
+		return
+	}
+	drop := len(m.lines) - maxOutputScrollbackLines
+	m.lines = append([]outputLine{}, m.lines[drop:]...)
+	m.selStartLine = max(0, m.selStartLine-drop)
+	m.selEndLine = max(0, m.selEndLine-drop)
 }

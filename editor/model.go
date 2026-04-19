@@ -15,23 +15,46 @@ type ChangedMsg struct{}
 
 var activeThemeName = "monokai"
 
+type selectionMode int
+
+const (
+	selectionLinear selectionMode = iota
+	selectionBlock
+)
+
+type snapshot struct {
+	lines         []string
+	cursorRow     int
+	cursorCol     int
+	rowOffset     int
+	colOffset     int
+	selectionMode selectionMode
+	selStartRow   int
+	selStartCol   int
+	selEndRow     int
+	selEndCol     int
+}
+
 type Model struct {
-	path        string
-	lines       []string
-	cursorRow   int
-	cursorCol   int
-	rowOffset   int
-	colOffset   int
-	width       int
-	height      int
-	dirty       bool
-	execLine    int
-	execWaiting bool
-	selecting   bool
-	selStartRow int
-	selStartCol int
-	selEndRow   int
-	selEndCol   int
+	path          string
+	lines         []string
+	cursorRow     int
+	cursorCol     int
+	rowOffset     int
+	colOffset     int
+	width         int
+	height        int
+	dirty         bool
+	execLine      int
+	execWaiting   bool
+	selecting     bool
+	selStartRow   int
+	selStartCol   int
+	selEndRow     int
+	selEndCol     int
+	selectionMode selectionMode
+	undoStack     []snapshot
+	redoStack     []snapshot
 }
 
 func New() Model {
@@ -72,6 +95,9 @@ func (m *Model) LoadFile(path, content string) {
 	m.dirty = false
 	m.execLine = 0
 	m.execWaiting = false
+	m.selectionMode = selectionLinear
+	m.undoStack = nil
+	m.redoStack = nil
 	m.ClearSelection()
 }
 
@@ -90,6 +116,10 @@ func (m Model) CurrentLine() string {
 	return m.lines[m.cursorRow]
 }
 
+func (m Model) CurrentCursorLine() int {
+	return m.cursorRow + 1
+}
+
 func (m Model) HasSelection() bool {
 	return m.selStartRow != m.selEndRow || m.selStartCol != m.selEndCol
 }
@@ -100,6 +130,19 @@ func (m *Model) ClearSelection() {
 	m.selStartCol = 0
 	m.selEndRow = 0
 	m.selEndCol = 0
+}
+
+func (m Model) BlockSelectionEnabled() bool {
+	return m.selectionMode == selectionBlock
+}
+
+func (m *Model) ToggleBlockSelection() bool {
+	if m.selectionMode == selectionBlock {
+		m.selectionMode = selectionLinear
+		return false
+	}
+	m.selectionMode = selectionBlock
+	return true
 }
 
 func (m Model) SelectedText() string {
@@ -118,11 +161,16 @@ func (m Model) SelectedText() string {
 		runes := []rune(m.lines[row])
 		from := 0
 		to := len(runes)
-		if row == startRow {
+		if m.selectionMode == selectionBlock {
 			from = clamp(startCol, 0, len(runes))
-		}
-		if row == endRow {
 			to = clamp(endCol, 0, len(runes))
+		} else {
+			if row == startRow {
+				from = clamp(startCol, 0, len(runes))
+			}
+			if row == endRow {
+				to = clamp(endCol, 0, len(runes))
+			}
 		}
 		if from > to {
 			from = to
@@ -140,6 +188,7 @@ func (m *Model) PasteText(text string) {
 	if text == "" {
 		return
 	}
+	m.pushUndo()
 	m.ClearSelection()
 	m.insertText(strings.ReplaceAll(text, "\r\n", "\n"))
 	m.dirty = true
@@ -285,14 +334,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case "enter":
 		changed = m.insertNewline()
 	case "tab":
-		m.ClearSelection()
-		m.insertText("    ")
-		changed = true
+		changed = m.insertLiteral("    ")
 	default:
 		if key.Type == tea.KeyRunes || key.Type == tea.KeySpace {
-			m.ClearSelection()
-			m.insertText(key.String())
-			changed = true
+			changed = m.insertRune(key.String())
 		}
 	}
 
@@ -441,26 +486,45 @@ func (m *Model) insertText(text string) {
 	m.cursorCol = runeCount(parts[len(parts)-1])
 }
 
+func (m *Model) insertLiteral(text string) bool {
+	m.pushUndo()
+	m.ClearSelection()
+	m.insertText(text)
+	return true
+}
+
 func (m *Model) MarkSaved() {
 	m.dirty = false
 }
 
 func (m *Model) insertNewline() bool {
+	m.pushUndo()
 	m.ClearSelection()
 	line := m.lines[m.cursorRow]
 	left, right := splitAtRune(line, m.cursorCol)
+	indent := leadingWhitespace(left)
+	if shouldIncreaseIndent(left) {
+		indent += "    "
+	}
 	m.lines[m.cursorRow] = left
-	next := append([]string{right}, m.lines[m.cursorRow+1:]...)
+	next := append([]string{indent + right}, m.lines[m.cursorRow+1:]...)
 	m.lines = append(m.lines[:m.cursorRow+1], next...)
 	m.cursorRow++
-	m.cursorCol = 0
+	m.cursorCol = runeCount(indent)
 	return true
 }
 
 func (m *Model) deleteBackward() bool {
+	m.pushUndo()
 	m.ClearSelection()
 	if m.cursorCol > 0 {
 		line := m.lines[m.cursorRow]
+		if pairStart, ok := emptyPairBeforeCursor(line, m.cursorCol); ok {
+			runes := []rune(line)
+			m.lines[m.cursorRow] = string(append(runes[:pairStart], runes[m.cursorCol+1:]...))
+			m.cursorCol--
+			return true
+		}
 		m.lines[m.cursorRow] = removeRuneAt(line, m.cursorCol-1)
 		m.cursorCol--
 		return true
@@ -478,6 +542,7 @@ func (m *Model) deleteBackward() bool {
 }
 
 func (m *Model) deleteForward() bool {
+	m.pushUndo()
 	m.ClearSelection()
 	line := m.lines[m.cursorRow]
 	if m.cursorCol < runeCount(line) {
@@ -489,6 +554,135 @@ func (m *Model) deleteForward() bool {
 	}
 	m.lines[m.cursorRow] += m.lines[m.cursorRow+1]
 	m.lines = append(m.lines[:m.cursorRow+1], m.lines[m.cursorRow+2:]...)
+	return true
+}
+
+func (m *Model) Undo() bool {
+	if len(m.undoStack) == 0 {
+		return false
+	}
+	m.redoStack = append(m.redoStack, m.snapshot())
+	prev := m.undoStack[len(m.undoStack)-1]
+	m.undoStack = m.undoStack[:len(m.undoStack)-1]
+	m.restore(prev)
+	m.dirty = true
+	return true
+}
+
+func (m *Model) Redo() bool {
+	if len(m.redoStack) == 0 {
+		return false
+	}
+	m.undoStack = append(m.undoStack, m.snapshot())
+	next := m.redoStack[len(m.redoStack)-1]
+	m.redoStack = m.redoStack[:len(m.redoStack)-1]
+	m.restore(next)
+	m.dirty = true
+	return true
+}
+
+func (m *Model) FindNext(query string, forward bool) bool {
+	queryRunes := []rune(query)
+	if len(queryRunes) == 0 || len(m.lines) == 0 {
+		return false
+	}
+
+	if forward {
+		for row := m.cursorRow; row < len(m.lines); row++ {
+			start := 0
+			if row == m.cursorRow {
+				start = min(runeCount(m.lines[row]), m.cursorCol)
+			}
+			if col := findInRunes([]rune(m.lines[row]), queryRunes, start, true); col >= 0 {
+				m.applyMatch(row, col, len(queryRunes))
+				return true
+			}
+		}
+		for row := 0; row <= m.cursorRow && row < len(m.lines); row++ {
+			end := runeCount(m.lines[row])
+			if row == m.cursorRow {
+				end = min(end, m.cursorCol)
+			}
+			if col := findInRunes([]rune(m.lines[row]), queryRunes, end, false); col >= 0 {
+				m.applyMatch(row, col, len(queryRunes))
+				return true
+			}
+		}
+		return false
+	}
+
+	for row := m.cursorRow; row >= 0; row-- {
+		end := runeCount(m.lines[row])
+		if row == m.cursorRow {
+			end = min(end, m.cursorCol)
+		}
+		if col := findInRunes([]rune(m.lines[row]), queryRunes, end, false); col >= 0 {
+			m.applyMatch(row, col, len(queryRunes))
+			return true
+		}
+	}
+	for row := len(m.lines) - 1; row >= m.cursorRow; row-- {
+		start := 0
+		if row == m.cursorRow {
+			start = min(runeCount(m.lines[row]), m.cursorCol)
+		}
+		if col := findInRunes([]rune(m.lines[row]), queryRunes, start, true); col >= 0 {
+			m.applyMatch(row, col, len(queryRunes))
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) ReplaceSelection(find, replace string) bool {
+	if !m.HasSelection() || m.selectionMode == selectionBlock || m.SelectedText() != find {
+		return false
+	}
+	m.pushUndo()
+	startRow, startCol, endRow, endCol := normalizeSelection(m.selStartRow, m.selStartCol, m.selEndRow, m.selEndCol)
+	left, _ := splitAtRune(m.lines[startRow], startCol)
+	_, right := splitAtRune(m.lines[endRow], endCol)
+	m.lines = append(append(append([]string{}, m.lines[:startRow]...), left+replace+right), m.lines[endRow+1:]...)
+	m.cursorRow = startRow
+	m.cursorCol = startCol + runeCount(replace)
+	m.selStartRow, m.selStartCol = startRow, startCol
+	m.selEndRow, m.selEndCol = startRow, m.cursorCol
+	m.ensureCursorVisible()
+	return true
+}
+
+func (m *Model) ReplaceAll(find, replace string) int {
+	if find == "" {
+		return 0
+	}
+	count := 0
+	lines := make([]string, len(m.lines))
+	for i, line := range m.lines {
+		replaced := strings.ReplaceAll(line, find, replace)
+		if replaced != line {
+			count += strings.Count(line, find)
+		}
+		lines[i] = replaced
+	}
+	if count == 0 {
+		return 0
+	}
+	m.pushUndo()
+	m.lines = lines
+	m.ClearSelection()
+	m.clampCursor()
+	m.ensureCursorVisible()
+	return count
+}
+
+func (m *Model) JumpToLine(line int) bool {
+	if line <= 0 || line > len(m.lines) {
+		return false
+	}
+	m.cursorRow = line - 1
+	m.cursorCol = min(m.cursorCol, runeCount(m.lines[m.cursorRow]))
+	m.ClearSelection()
+	m.ensureCursorVisible()
 	return true
 }
 
@@ -602,11 +796,16 @@ func (m Model) selectionForLine(lineIndex int) (int, int, bool) {
 	lineLen := runeCount(m.lines[lineIndex])
 	start := 0
 	end := lineLen
-	if lineIndex == startRow {
+	if m.selectionMode == selectionBlock {
 		start = clamp(startCol, 0, lineLen)
-	}
-	if lineIndex == endRow {
 		end = clamp(endCol, 0, lineLen)
+	} else {
+		if lineIndex == startRow {
+			start = clamp(startCol, 0, lineLen)
+		}
+		if lineIndex == endRow {
+			end = clamp(endCol, 0, lineLen)
+		}
 	}
 	if start > end {
 		start = end
@@ -685,4 +884,152 @@ func removeRuneAt(s string, idx int) string {
 
 func runeCount(s string) int {
 	return len([]rune(s))
+}
+
+func (m *Model) pushUndo() {
+	m.undoStack = append(m.undoStack, m.snapshot())
+	if len(m.undoStack) > 200 {
+		m.undoStack = m.undoStack[len(m.undoStack)-200:]
+	}
+	m.redoStack = nil
+}
+
+func (m Model) snapshot() snapshot {
+	lines := make([]string, len(m.lines))
+	copy(lines, m.lines)
+	return snapshot{
+		lines:         lines,
+		cursorRow:     m.cursorRow,
+		cursorCol:     m.cursorCol,
+		rowOffset:     m.rowOffset,
+		colOffset:     m.colOffset,
+		selectionMode: m.selectionMode,
+		selStartRow:   m.selStartRow,
+		selStartCol:   m.selStartCol,
+		selEndRow:     m.selEndRow,
+		selEndCol:     m.selEndCol,
+	}
+}
+
+func (m *Model) restore(s snapshot) {
+	m.lines = append([]string{}, s.lines...)
+	m.cursorRow = s.cursorRow
+	m.cursorCol = s.cursorCol
+	m.rowOffset = s.rowOffset
+	m.colOffset = s.colOffset
+	m.selectionMode = s.selectionMode
+	m.selStartRow = s.selStartRow
+	m.selStartCol = s.selStartCol
+	m.selEndRow = s.selEndRow
+	m.selEndCol = s.selEndCol
+	m.clampCursor()
+	m.ensureCursorVisible()
+}
+
+func (m *Model) insertRune(value string) bool {
+	if value == "" {
+		return false
+	}
+	r := []rune(value)[0]
+	if closer, ok := autoClosePair(r); ok {
+		m.pushUndo()
+		m.ClearSelection()
+		m.insertText(string([]rune{r, closer}))
+		m.cursorCol--
+		return true
+	}
+	if shouldSkipCloser(r, m.lines[m.cursorRow], m.cursorCol) {
+		m.ClearSelection()
+		m.cursorCol++
+		return false
+	}
+	return m.insertLiteral(value)
+}
+
+func (m *Model) applyMatch(row, col, width int) {
+	m.cursorRow = row
+	m.cursorCol = col + width
+	m.selectionMode = selectionLinear
+	m.selStartRow, m.selStartCol = row, col
+	m.selEndRow, m.selEndCol = row, col+width
+	m.ensureCursorVisible()
+}
+
+func leadingWhitespace(s string) string {
+	runes := []rune(s)
+	idx := 0
+	for idx < len(runes) && (runes[idx] == ' ' || runes[idx] == '\t') {
+		idx++
+	}
+	return string(runes[:idx])
+}
+
+func shouldIncreaseIndent(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	return strings.HasSuffix(trimmed, ":") || strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[") || strings.HasSuffix(trimmed, "(")
+}
+
+func autoClosePair(r rune) (rune, bool) {
+	switch r {
+	case '(':
+		return ')', true
+	case '[':
+		return ']', true
+	case '{':
+		return '}', true
+	case '"':
+		return '"', true
+	case '\'':
+		return '\'', true
+	default:
+		return 0, false
+	}
+}
+
+func shouldSkipCloser(r rune, line string, col int) bool {
+	switch r {
+	case ')', ']', '}', '"', '\'':
+	default:
+		return false
+	}
+	runes := []rune(line)
+	return col < len(runes) && runes[col] == r
+}
+
+func emptyPairBeforeCursor(line string, col int) (int, bool) {
+	runes := []rune(line)
+	if col <= 0 || col >= len(runes) {
+		return 0, false
+	}
+	switch {
+	case runes[col-1] == '(' && runes[col] == ')':
+	case runes[col-1] == '[' && runes[col] == ']':
+	case runes[col-1] == '{' && runes[col] == '}':
+	case runes[col-1] == '"' && runes[col] == '"':
+	case runes[col-1] == '\'' && runes[col] == '\'':
+	default:
+		return 0, false
+	}
+	return col - 1, true
+}
+
+func findInRunes(line, query []rune, anchor int, forward bool) int {
+	if len(query) == 0 || len(line) < len(query) {
+		return -1
+	}
+	if forward {
+		for i := max(0, anchor); i <= len(line)-len(query); i++ {
+			if string(line[i:i+len(query)]) == string(query) {
+				return i
+			}
+		}
+		return -1
+	}
+	limit := min(anchor-len(query), len(line)-len(query))
+	for i := limit; i >= 0; i-- {
+		if string(line[i:i+len(query)]) == string(query) {
+			return i
+		}
+	}
+	return -1
 }

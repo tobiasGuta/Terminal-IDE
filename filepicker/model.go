@@ -32,6 +32,8 @@ type entry struct {
 
 type Model struct {
 	mode    Mode
+	root    string
+	rooted  bool
 	cwd     string
 	width   int
 	height  int
@@ -41,6 +43,14 @@ type Model struct {
 }
 
 func New(root string, mode Mode) Model {
+	return newModel(root, mode, false)
+}
+
+func NewRooted(root string, mode Mode) Model {
+	return newModel(root, mode, true)
+}
+
+func newModel(root string, mode Mode, rooted bool) Model {
 	if root == "" {
 		root, _ = os.Getwd()
 	}
@@ -48,7 +58,7 @@ func New(root string, mode Mode) Model {
 		root = abs
 	}
 	root = filepath.Clean(root)
-	m := Model{cwd: root, mode: mode}
+	m := Model{cwd: root, root: root, rooted: rooted, mode: mode}
 	m.reload()
 	return m
 }
@@ -64,6 +74,14 @@ func (m Model) Mode() Mode {
 
 func (m Model) CWD() string {
 	return m.cwd
+}
+
+func (m Model) Root() string {
+	return m.root
+}
+
+func (m Model) Rooted() bool {
+	return m.rooted
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
@@ -92,7 +110,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 		if selected.isDir {
-			m.cwd = selected.path
+			next := filepath.Clean(selected.path)
+			if m.rooted && !isWithinRoot(m.root, next) {
+				m.err = "Navigation outside the allowed root is blocked."
+				return m, nil
+			}
+			m.cwd = next
 			m.index = 0
 			m.reload()
 			return m, nil
@@ -150,7 +173,7 @@ func (m Model) View() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err))
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("↑/↓ move • enter open/select • esc back")
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("esc back • enter select • ↑↓ navigate")
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", strings.Join(lines, "\n"), "", footer)
 }
 
@@ -165,7 +188,7 @@ func (m *Model) reload() {
 	var dirs []entry
 	var files []entry
 
-	if parent := filepath.Dir(m.cwd); parent != m.cwd {
+	if parent := filepath.Dir(m.cwd); parent != m.cwd && (!m.rooted || isWithinRoot(m.root, parent)) {
 		dirs = append(dirs, entry{name: "..", path: parent, isDir: true})
 	}
 
@@ -176,8 +199,11 @@ func (m *Model) reload() {
 	for _, item := range entries {
 		entry := entry{
 			name:  item.Name(),
-			path:  filepath.Join(m.cwd, item.Name()),
+			path:  filepath.Clean(filepath.Join(m.cwd, item.Name())),
 			isDir: item.IsDir(),
+		}
+		if m.rooted && !isWithinRoot(m.root, entry.path) {
+			continue
 		}
 		if entry.isDir {
 			dirs = append(dirs, entry)
@@ -208,4 +234,17 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isWithinRoot(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == path {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

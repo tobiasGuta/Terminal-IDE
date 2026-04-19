@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Event interface {
@@ -45,6 +47,7 @@ type FinishedMsg struct {
 	ID        int
 	Err       error
 	Cancelled bool
+	TimedOut  bool
 }
 
 func (m FinishedMsg) Sequence() int { return m.ID }
@@ -61,6 +64,8 @@ const executionEventPrefix = "__TUI_EVT__"
 
 type RunOptions struct {
 	PythonInterpreter string
+	MaxRuntime        time.Duration
+	DisableSandbox    bool
 }
 
 type PythonInterpreter struct {
@@ -143,6 +148,15 @@ func (m *Manager) SendInput(id int, input string) error {
 func (m *Manager) run(ctx context.Context, id int, path, content string, opts RunOptions) {
 	m.events <- StartedMsg{ID: id}
 
+	if opts.MaxRuntime <= 0 {
+		opts.MaxRuntime = DefaultMaxRuntime
+	}
+	if opts.MaxRuntime > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.MaxRuntime)
+		defer cancel()
+	}
+
 	dir, err := os.MkdirTemp("", "terminal-ide-run-*")
 	if err != nil {
 		m.events <- FinishedMsg{ID: id, Err: err}
@@ -150,25 +164,15 @@ func (m *Manager) run(ctx context.Context, id int, path, content string, opts Ru
 	}
 	defer os.RemoveAll(dir)
 
-	base := filepath.Base(path)
-	if base == "." || base == string(filepath.Separator) || base == "" {
-		base = "snippet.py"
-	}
-
-	tempPath := filepath.Join(dir, base)
-	if err := os.WriteFile(tempPath, []byte(content), 0o644); err != nil {
-		m.events <- FinishedMsg{ID: id, Err: err}
-		return
-	}
-
-	cmd, err := commandForPath(ctx, path, tempPath, dir, opts)
+	prepared, err := prepareRun(ctx, path, content, dir, opts)
 	if err != nil {
 		m.events <- FinishedMsg{ID: id, Err: err}
 		return
 	}
-	if cmd.Dir == "" {
-		cmd.Dir = dir
+	if prepared.cleanup != nil {
+		defer prepared.cleanup()
 	}
+	cmd := prepared.cmd
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -200,7 +204,15 @@ func (m *Manager) run(ctx context.Context, id int, path, content string, opts Ru
 	m.clearStdin(id)
 
 	err = cmd.Wait()
-	if ctx.Err() == context.Canceled {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		m.events <- FinishedMsg{
+			ID:       id,
+			Err:      fmt.Errorf("run timed out after %s", opts.MaxRuntime.Round(time.Second)),
+			TimedOut: true,
+		}
+		return
+	case errors.Is(ctx.Err(), context.Canceled):
 		m.events <- FinishedMsg{ID: id, Cancelled: true}
 		return
 	}
@@ -306,38 +318,6 @@ func (m *Manager) clearStdin(id int) {
 	}
 }
 
-func commandForPath(ctx context.Context, originalPath, tempPath, tempDir string, opts RunOptions) (*exec.Cmd, error) {
-	switch strings.ToLower(filepath.Ext(originalPath)) {
-	case ".py":
-		interpreter := opts.PythonInterpreter
-		var err error
-		if interpreter == "" {
-			interpreter, err = detectPythonInterpreter(ctx, tempPath)
-		} else if _, err = exec.LookPath(interpreter); err != nil {
-			if _, statErr := os.Stat(interpreter); statErr != nil {
-				return nil, fmt.Errorf("selected interpreter %q is not available", interpreter)
-			}
-		}
-		if err != nil {
-			return nil, err
-		}
-		bootstrapPath := filepath.Join(tempDir, "__terminal_ide_trace__.py")
-		if err := os.WriteFile(bootstrapPath, []byte(pythonTraceBootstrap), 0o644); err != nil {
-			return nil, err
-		}
-		cmd := exec.CommandContext(ctx, interpreter, "-u", bootstrapPath, tempPath, originalPath)
-		cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
-		cmd.Dir = filepath.Dir(originalPath)
-		return cmd, nil
-	case ".go":
-		cmd := exec.CommandContext(ctx, "go", "run", tempPath)
-		cmd.Dir = filepath.Dir(originalPath)
-		return cmd, nil
-	default:
-		return nil, fmt.Errorf("live run supports .py and .go files right now")
-	}
-}
-
 type tracedEvent struct {
 	Type string `json:"type"`
 	File string `json:"file"`
@@ -345,11 +325,12 @@ type tracedEvent struct {
 }
 
 const pythonTraceBootstrap = `
+import base64
 import json
 import os
 import sys
 
-TEMP_SOURCE_PATH = sys.argv[1]
+SOURCE_TOKEN = sys.argv[1]
 ORIGINAL_PATH = sys.argv[2]
 CURRENT_LINE = 0
 EVENT_PREFIX = "__TUI_EVT__"
@@ -392,8 +373,12 @@ if hasattr(_builtins, "raw_input"):
     _builtins.raw_input = traced_input
 _builtins.input = traced_input
 
-with open(TEMP_SOURCE_PATH, "rb") as handle:
-    source = handle.read()
+if SOURCE_TOKEN == "--inline":
+    encoded = os.environ.get("TERMINAL_IDE_SOURCE_B64", "")
+    source = base64.b64decode(encoded.encode("ascii"))
+else:
+    with open(SOURCE_TOKEN, "rb") as handle:
+        source = handle.read()
 
 sys.argv = [ORIGINAL_PATH]
 sys.path[0] = os.path.dirname(ORIGINAL_PATH)
@@ -422,12 +407,7 @@ else:
     emit_final("finished")
 `
 
-func detectPythonInterpreter(ctx context.Context, path string) (string, error) {
-	sourceBytes, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	source := string(sourceBytes)
+func detectPythonInterpreter(ctx context.Context, originalPath, source string) (string, error) {
 
 	if explicit := interpreterFromShebang(source); explicit != "" {
 		if _, err := exec.LookPath(explicit); err == nil {
@@ -451,7 +431,7 @@ func detectPythonInterpreter(ctx context.Context, path string) (string, error) {
 		}
 	}
 
-	if detected := pickByCompilationProbe(ctx, path, py3Candidates, py2Candidates); detected != "" {
+	if detected := pickByCompilationProbe(ctx, originalPath, source, py3Candidates, py2Candidates); detected != "" {
 		return detected, nil
 	}
 
@@ -583,9 +563,9 @@ func pythonVersionDetails(interpreter string) (int, string) {
 	return major, strings.TrimSpace(string(versionOutput))
 }
 
-func pickByCompilationProbe(ctx context.Context, path string, py3Candidates, py2Candidates []string) string {
-	py3 := firstCompilingInterpreter(ctx, path, py3Candidates)
-	py2 := firstCompilingInterpreter(ctx, path, py2Candidates)
+func pickByCompilationProbe(ctx context.Context, originalPath, source string, py3Candidates, py2Candidates []string) string {
+	py3 := firstCompilingInterpreter(ctx, originalPath, source, py3Candidates)
+	py2 := firstCompilingInterpreter(ctx, originalPath, source, py2Candidates)
 
 	switch {
 	case py3 != "" && py2 == "":
@@ -599,17 +579,18 @@ func pickByCompilationProbe(ctx context.Context, path string, py3Candidates, py2
 	}
 }
 
-func firstCompilingInterpreter(ctx context.Context, path string, interpreters []string) string {
+func firstCompilingInterpreter(ctx context.Context, originalPath, source string, interpreters []string) string {
 	for _, interpreter := range interpreters {
-		if pythonCompiles(ctx, interpreter, path) {
+		if pythonCompiles(ctx, interpreter, originalPath, source) {
 			return interpreter
 		}
 	}
 	return ""
 }
 
-func pythonCompiles(ctx context.Context, interpreter, path string) bool {
-	cmd := exec.CommandContext(ctx, interpreter, "-m", "py_compile", path)
+func pythonCompiles(ctx context.Context, interpreter, originalPath, source string) bool {
+	cmd := exec.CommandContext(ctx, interpreter, "-c", "import sys; compile(sys.stdin.read(), sys.argv[1], 'exec')", originalPath)
+	cmd.Stdin = strings.NewReader(source)
 	err := cmd.Run()
 	return err == nil
 }

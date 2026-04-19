@@ -1,0 +1,14 @@
+# test log
+getenv GOTMPDIR
+getenv TMPDIR
+open /tmp/TestMergeConfigFileParsesTomlStyleKeys3635308843/001/config.toml
+open /tmp/TestMergeConfigFileParsesTomlStyleKeys3635308843/001/config.toml
+open /tmp
+getenv OPENAI_API_KEY
+getenv GEMINI_API_KEY
+getenv ANTHROPIC_API_KEY
+getenv TERMINAL_IDE_AI_MODEL
+getenv OPENAI_API_KEY
+getenv GEMINI_API_KEY
+getenv ANTHROPIC_API_KEY
+getenv TERMINAL_IDE_AI_MODEL

@@ -21,7 +21,7 @@ A terminal-based IDE written in Go using Bubble Tea, Lip Gloss, and Chroma. It i
 - AI Error Decoder via `Ctrl+E`
 - Socratic AI hints via `Ctrl+H`
 - AI model selection via `Alt+M`
-- Google Gemini and OpenAI support with automatic provider selection
+- Google Gemini, OpenAI, and Anthropic support with automatic provider selection
 
 ## Build
 
@@ -39,6 +39,26 @@ go run ./cmd/ide
 ## AI Setup
 
 AI is optional. If no API key is set, the editor still works normally and AI features stay disabled.
+
+### Config File
+
+You can keep AI credentials and a default model in config files instead of exporting env vars every shell session.
+
+Supported config locations, loaded in this order:
+
+- `~/.config/terminal-ide/config.toml`
+- `.terminal-ide.toml` in the current project directory
+
+Environment variables still win over file values.
+
+Example:
+
+```toml
+gemini_api_key = "your-gemini-api-key"
+openai_api_key = "your-openai-api-key"
+anthropic_api_key = "your-anthropic-api-key"
+preferred_ai_model = "claude-3-5-sonnet-latest"
+```
 
 ### Recommended: Google Gemini
 
@@ -71,11 +91,20 @@ Available OpenAI models:
 - `gpt-4o-mini`
 - `gpt-4o`
 
+### Anthropic
+
+If `ANTHROPIC_API_KEY` is configured, Claude models are also available in the model picker.
+
+Available Anthropic models:
+
+- `claude-3-5-sonnet-latest`
+- `claude-3-5-haiku-latest`
+
 ### Provider Selection Rules
 
 - If `GEMINI_API_KEY` is set, Gemini is preferred by default
 - If Gemini is not set but `OPENAI_API_KEY` is set, OpenAI is used
-- If both are set, you can switch models during the session with `Alt+M`
+- If multiple providers are set, you can switch models during the session with `Alt+M`
 - If neither key is set, AI features stay disabled with no side effects
 
 ## How To Use
@@ -108,7 +137,7 @@ Use `Ctrl+E` in the editor screen to ask the AI to explain the current Python er
 
 What it does:
 
-- Reads the current tab's source code
+- Reads a focused window of the current tab's source code around the relevant line
 - Collects the current stderr traceback from the output pane
 - Sends both to the active AI provider
 - Appends a plain-English explanation under `── AI Explanation ──`
@@ -125,7 +154,7 @@ Use `Ctrl+H` in the editor screen to ask for a Socratic hint.
 
 What it does:
 
-- Sends the current file contents
+- Sends a focused code window around the current execution line
 - Includes the current error output, if any
 - Includes the current execution line
 - Returns a short hint without giving the full answer
@@ -135,7 +164,7 @@ Hint behavior:
 - Hint level starts at 1
 - Pressing `Ctrl+H` again on the same unchanged file increases the hint level up to 3
 - Editing the file resets the hint level back to 1
-- AI requests are rate-limited to one request every 10 seconds per tab
+- AI requests are rate-limited globally
 
 ### AI Loading Indicator
 
@@ -154,7 +183,7 @@ Behavior:
 - If only one provider is configured, the app auto-selects that provider's first model
 - If both Gemini and OpenAI are configured, a picker opens
 - The active model name is shown in muted text on the right side of the footer
-- If no AI key is configured, the status bar tells you to set `GEMINI_API_KEY` or `OPENAI_API_KEY`
+- If no AI key is configured, the status bar tells you to set AI keys in env vars or config
 
 ## Keyboard Shortcuts
 
@@ -197,6 +226,7 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 - Python files are launched in unbuffered mode so prompts from `input()` and `raw_input()` show immediately
 - Python runs emit live execution-line events so the editor can highlight the current line and pause on blocking input
 - `Open Folder` lets you choose a directory first, then browse files inside it
+- The file picker is rooted to the directory you opened, so it cannot browse above that boundary
 - `Ctrl+M` is not used for the AI model picker because many terminals treat it as `Enter`
 
 ## Screenshots

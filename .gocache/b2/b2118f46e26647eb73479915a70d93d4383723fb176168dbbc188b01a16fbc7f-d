@@ -1,0 +1,10 @@
+./app.go
+./clipboard.go
+./interpreterpicker.go
+./modelpicker.go
+./newfile.go
+./output.go
+./styles.go
+./theme.go
+./themepicker.go
+./welcome.go

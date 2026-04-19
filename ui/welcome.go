@@ -105,7 +105,7 @@ func (m welcomeModel) View() string {
 		"",
 		errorStyle.Render(m.message),
 		mutedStyle.Render(""),
-		mutedStyle.Render("↑/↓ move • enter select • ctrl+q quit"),
+		mutedStyle.Render("enter open • n new file • ctrl+q quit"),
 	)
 
 	card := activePanelStyle.Padding(1, 3).Render(body)
