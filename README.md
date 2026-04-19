@@ -12,6 +12,7 @@ A terminal IDE written in Go with Bubble Tea, Lip Gloss, and Chroma. It combines
 - Persistent workspace sidebar for browsing the current folder tree
 - Git status indicators in the sidebar, tabs, and file header
 - Split editor and live output layout with capped output scrollback
+- Horizontal scrolling in the editor and output panes for long lines
 - Debounced live execution for `.py` and `.go`
 - Real-time stdout/stderr streaming plus live stdin input
 - Python execution tracing with a live execution pointer in the editor
@@ -19,6 +20,7 @@ A terminal IDE written in Go with Bubble Tea, Lip Gloss, and Chroma. It combines
 - Editor quality-of-life features:
   - undo/redo
   - find/replace
+  - live find preview with wrapped-search feedback
   - jump to line
   - auto-indent
   - bracket and quote auto-close
@@ -160,6 +162,7 @@ Available Anthropic models:
 - Type directly in the editor pane
 - Use the sidebar to switch files inside the active workspace
 - The app automatically reruns supported files after a short debounce when you edit
+- Use `Alt+Left` / `Alt+Right` in the editor to scroll long lines horizontally
 
 ### Running Code
 
@@ -168,6 +171,7 @@ Available Anthropic models:
 - Stdout and stderr appear in the lower output pane
 - If your program waits for input, use `Ctrl+L` to focus the live input area, type your response, and press `Enter`
 - Long-running programs stop automatically when they hit the max runtime
+- When output lines are wider than the pane, focus the output and use `Left` / `Right` to scroll horizontally
 
 ### Python Tracing
 
@@ -247,12 +251,17 @@ Behavior:
 
 The footer is contextual and shows only a few shortcuts relevant to the current screen or focus state.
 
+## Continuous Testing
+
+GitHub Actions runs `go test ./...` on pushes and pull requests.
+
 ## Keyboard Shortcuts
 
 - `Ctrl+S` save and rerun
 - `Ctrl+Z` undo
 - `Ctrl+Y` redo
 - `Ctrl+F` find and replace
+- `Alt+Left` / `Alt+Right` scroll long editor lines horizontally
 - `Ctrl+G` go to line
 - `Ctrl+P` command palette
 - `?` open command palette
@@ -262,6 +271,7 @@ The footer is contextual and shows only a few shortcuts relevant to the current 
 - `Tab` or `Ctrl+]` next tab
 - `Ctrl+C` copy selected live output text, or else the current editor line/input buffer
 - `Ctrl+V` paste clipboard into the editor or live input
+- `Left` / `Right` scroll long output lines horizontally when the output pane is focused
 - `Ctrl+L` focus live input
 - `Ctrl+R` open the Python interpreter selector for the current Python tab
 - `Ctrl+E` request AI error explanation from the current error output
@@ -303,4 +313,3 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 - `Ctrl+M` is not used for the AI model picker because many terminals treat it as `Enter`
 
 ## Screenshots
-

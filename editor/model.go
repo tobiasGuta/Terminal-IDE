@@ -259,6 +259,29 @@ func (m *Model) Scroll(delta int) {
 	m.clampCursor()
 }
 
+func (m *Model) ScrollHorizontal(delta int) {
+	if delta == 0 {
+		return
+	}
+
+	m.colOffset += delta
+	if m.colOffset < 0 {
+		m.colOffset = 0
+	}
+
+	maxLineWidth := 0
+	for _, line := range m.lines {
+		if width := runeCount(line); width > maxLineWidth {
+			maxLineWidth = width
+		}
+	}
+	viewWidth := max(1, m.width-8)
+	maxOffset := max(0, maxLineWidth-viewWidth)
+	if m.colOffset > maxOffset {
+		m.colOffset = maxOffset
+	}
+}
+
 func (m *Model) SetExecution(line int, waiting bool) {
 	m.execLine = line
 	m.execWaiting = waiting

@@ -151,6 +151,29 @@ func TestFindPromptReportsWrappedSearch(t *testing.T) {
 	}
 }
 
+func TestAltRightScrollsEditorHorizontally(t *testing.T) {
+	m := NewApp().(*appModel)
+	m.width = 120
+	m.height = 40
+	m.resize()
+
+	path := writeTempFile(t, t.TempDir(), "wide.py", "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n")
+	idx, err := m.openFile(path)
+	if err != nil {
+		t.Fatalf("openFile failed: %v", err)
+	}
+	m.tabs[idx].editor.SetSize(16, 5)
+	m.focus = "editor"
+	before := m.tabs[idx].editor.View()
+
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight, Alt: true})
+	app := model.(*appModel)
+	after := app.tabs[idx].editor.View()
+	if before == after {
+		t.Fatalf("expected editor view to change after horizontal scroll")
+	}
+}
+
 func writeTempFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

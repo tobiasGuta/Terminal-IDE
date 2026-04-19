@@ -163,3 +163,19 @@ func TestFindNextReportsWrap(t *testing.T) {
 		t.Fatalf("expected beta to be selected after wrap, got %q", got)
 	}
 }
+
+func TestScrollHorizontalAdjustsColumnOffset(t *testing.T) {
+	m := New()
+	m.LoadFile("sample.py", "abcdefghijklmnopqrstuvwxyz")
+	m.SetSize(12, 5)
+
+	m.ScrollHorizontal(5)
+	if m.colOffset != 5 {
+		t.Fatalf("expected horizontal offset 5, got %d", m.colOffset)
+	}
+
+	m.ScrollHorizontal(-20)
+	if m.colOffset != 0 {
+		t.Fatalf("expected horizontal offset clamped to 0, got %d", m.colOffset)
+	}
+}
