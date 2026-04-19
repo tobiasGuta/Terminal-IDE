@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"terminal-ide/ai"
 	"terminal-ide/editor"
@@ -93,6 +92,7 @@ type editorTab struct {
 	path              string
 	editor            editor.Model
 	output            outputModel
+	runner            *runner.Manager
 	status            string
 	debounceToken     int
 	activeRunID       int
@@ -101,16 +101,11 @@ type editorTab struct {
 	lastHintSource    string
 }
 
-type tabHitbox struct {
-	index int
-	start int
-	end   int
-}
-
 type editorLayout struct {
 	panelX       int
 	panelY       int
 	panelWidth   int
+	topWidth     int
 	topHeight    int
 	bottomY      int
 	bottomHeight int
@@ -146,7 +141,6 @@ type appModel struct {
 	modelPicker        modelPickerModel
 	themePicker        themePickerModel
 	commandPalette     commandPaletteModel
-	runner             *runner.Manager
 	aiClient           *ai.Client
 	selectedAIModel    string
 	selectedTheme      string
@@ -189,7 +183,6 @@ func NewApp() tea.Model {
 		modelPicker:        newModelPickerModel(nil, ""),
 		themePicker:        newThemePickerModel(nil, ""),
 		commandPalette:     newCommandPaletteModel(),
-		runner:             runner.New(),
 		aiClient:           aiClient,
 		aiEvents:           make(chan aiStreamEvent, 256),
 		selectedAIModel:    aiClient.Model(),
@@ -205,7 +198,7 @@ func NewApp() tea.Model {
 }
 
 func (m *appModel) Init() tea.Cmd {
-	return tea.Batch(waitForRunnerEvent(m.runner), m.welcome.Init())
+	return m.welcome.Init()
 }
 
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -216,73 +209,8 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 		return m, nil
 
-	case runner.StartedMsg:
-		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
-			m.tabs[idx].output.SetStatus("Running...")
-			m.tabs[idx].status = "Running..."
-		}
-		return m, waitForRunnerEvent(m.runner)
-
-	case runner.OutputMsg:
-		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
-			m.tabs[idx].output.Append(msg.Text, msg.IsErr)
-		}
-		return m, waitForRunnerEvent(m.runner)
-
-	case runner.ExecutionMsg:
-		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
-			m.tabs[idx].editor.SetExecution(msg.Line, msg.Waiting)
-			switch msg.State {
-			case "waiting_input":
-				m.tabs[idx].status = fmt.Sprintf("Waiting for input on line %d", msg.Line)
-			case "line", "resumed":
-				m.tabs[idx].status = fmt.Sprintf("Executing line %d", msg.Line)
-			case "finished":
-				m.tabs[idx].status = fmt.Sprintf("Finished on line %d", msg.Line)
-			case "exception":
-				m.tabs[idx].status = fmt.Sprintf("Stopped on line %d", msg.Line)
-			}
-		}
-		return m, waitForRunnerEvent(m.runner)
-
-	case runner.FinishedMsg:
-		if idx := m.findTabByRunID(msg.ID); idx >= 0 {
-			m.tabs[idx].activeRunID = 0
-			if idx == m.activeTab {
-				m.tabs[idx].output.SetInputFocus(false)
-				m.focus = "editor"
-			}
-			finalLine := m.tabs[idx].editor.ExecutionLine()
-			switch {
-			case msg.Cancelled:
-				m.tabs[idx].editor.ClearExecution()
-				m.tabs[idx].output.SetStatus("Run cancelled")
-				m.tabs[idx].status = "Run cancelled"
-			case msg.TimedOut:
-				m.tabs[idx].editor.ClearExecution()
-				m.tabs[idx].output.SetStatus("Run timed out")
-				if msg.Err != nil {
-					m.tabs[idx].output.Append(msg.Err.Error(), true)
-				}
-				m.tabs[idx].status = "Run timed out"
-			case msg.Err != nil:
-				m.tabs[idx].output.SetStatus("Run finished with errors")
-				m.tabs[idx].output.Append(msg.Err.Error(), true)
-				if finalLine > 0 {
-					m.tabs[idx].status = fmt.Sprintf("Run stopped on line %d", finalLine)
-				} else {
-					m.tabs[idx].status = "Run finished with errors"
-				}
-			default:
-				m.tabs[idx].output.SetStatus("Run finished successfully")
-				if finalLine > 0 {
-					m.tabs[idx].status = fmt.Sprintf("Run finished on line %d", finalLine)
-				} else {
-					m.tabs[idx].status = "Run finished successfully"
-				}
-			}
-		}
-		return m, waitForRunnerEvent(m.runner)
+	case runnerEventMsg:
+		return m, m.handleRunnerEvent(msg)
 
 	case aiResultMsg:
 		if msg.tabIndex >= 0 && msg.tabIndex < len(m.tabs) && msg.content != "" {
@@ -368,7 +296,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editor.ChangedMsg:
 		if m.screen == screenEditor && m.hasActiveTab() {
 			if m.tabs[m.activeTab].activeRunID != 0 {
-				m.runner.StopRun(m.tabs[m.activeTab].activeRunID)
+				m.tabs[m.activeTab].runner.StopRun(m.tabs[m.activeTab].activeRunID)
 				m.tabs[m.activeTab].activeRunID = 0
 				m.tabs[m.activeTab].output.Reset("Queued run...")
 				m.tabs[m.activeTab].output.ClearInput()
@@ -384,7 +312,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case debounceMsg:
 		idx := m.findTabByID(msg.tabID)
 		if idx >= 0 && idx == m.activeTab && msg.token == m.tabs[idx].debounceToken && m.screen == screenEditor {
-			m.startRunForTab(idx, "Queued run...")
+			return m, m.startRunForTab(idx, "Queued run...")
 		}
 		return m, nil
 
@@ -513,7 +441,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		default:
 			if submitted, ok := m.tabs[m.activeTab].output.HandleKey(key.String()); ok {
-				if err := m.runner.SendInput(m.tabs[m.activeTab].activeRunID, submitted+"\n"); err != nil {
+				if err := m.tabs[m.activeTab].runner.SendInput(m.tabs[m.activeTab].activeRunID, submitted+"\n"); err != nil {
 					m.tabs[m.activeTab].output.Append(err.Error(), true)
 				} else {
 					m.tabs[m.activeTab].output.EchoSubmittedInput(submitted)
@@ -528,7 +456,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch key.String() {
 	case "ctrl+q":
-		m.runner.Stop()
+		m.stopAllRuns()
 		return m, tea.Quit
 	case "ctrl+p", "?":
 		if m.screen == screenEditor || m.screen == screenWelcome {
@@ -685,7 +613,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.screen = screenWelcome
 			m.status = "Returned to welcome menu."
-			m.runner.Stop()
+			m.stopAllRuns()
 			if m.hasActiveTab() {
 				m.tabs[m.activeTab].output.SetInputFocus(false)
 			}
@@ -704,15 +632,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+s":
 		if m.screen == screenEditor && m.hasActiveTab() {
-			tab := &m.tabs[m.activeTab]
-			if err := os.WriteFile(tab.path, []byte(tab.editor.Content()), 0o644); err != nil {
-				tab.status = err.Error()
-			} else {
-				tab.editor.MarkSaved()
-				m.refreshWorkspaceView()
-				tab.status = fmt.Sprintf("Saved %s", filepath.Base(tab.path))
-				m.startRunForTab(m.activeTab, "Saved and running...")
-			}
+			return m, m.saveActiveTab()
 		}
 		return m, nil
 	case "alt+b":
@@ -828,8 +748,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tabs[m.activeTab].status = fmt.Sprintf("Interpreter: %s", label)
 			}
 			m.screen = m.popScreen()
-			m.startRunForTab(m.activeTab, "Interpreter changed, running...")
-			return m, nil
+			return m, m.startRunForTab(m.activeTab, "Interpreter changed, running...")
 		}
 		return m, cmd
 
@@ -877,130 +796,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *appModel) View() string {
-	if m.screen == screenCommandPalette {
-		return lipgloss.Place(
-			max(1, m.width),
-			max(1, m.height),
-			lipgloss.Center,
-			lipgloss.Center,
-			m.commandPalette.View(),
-		)
-	}
-
-	if m.width == 0 || m.height == 0 {
-		return "Loading..."
-	}
-
-	switch m.screen {
-	case screenWelcome:
-		return m.welcome.View()
-	case screenPicker:
-		card := activePanelStyle.Width(max(20, m.width-4)).Height(max(8, m.height-4)).Render(m.picker.View())
-		return appPaddingStyle.Render(card)
-	case screenNewFile:
-		return m.newFile.View()
-	case screenInterpreterPicker:
-		return m.interpreterPicker.View()
-	case screenModelPicker:
-		return m.modelPicker.View()
-	case screenThemePicker:
-		return m.themePicker.View()
-	case screenEditor:
-		if !m.hasActiveTab() {
-			return m.welcome.View()
-		}
-
-		tab := m.tabs[m.activeTab]
-		panelWidth := max(20, m.width-4)
-		editorBodyHeight := max(3, m.editorHeight-editorChromeRows)
-		sidebarOuterWidth := min(32, max(20, panelWidth/4))
-		editorOuterWidth := max(20, panelWidth-sidebarOuterWidth-1)
-		sidebarContentWidth := max(10, sidebarOuterWidth-panelStyle.GetHorizontalFrameSize())
-		editorContentWidth := max(10, editorOuterWidth-activePanelStyle.GetHorizontalFrameSize())
-		topBodyHeight := lipgloss.Height("x") + lipgloss.Height("x") + editorBodyHeight
-		tab.editor.SetSize(editorContentWidth, editorBodyHeight)
-		tab.output.SetSize(max(10, panelWidth-4), max(2, m.outputHeight-2))
-		m.refreshWorkspaceView()
-		m.ensureSidebarEntryVisible(tab.path, editorBodyHeight)
-		tabBar := lipgloss.NewStyle().
-			Width(editorContentWidth).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("8")).
-			Render(m.renderTabBar(editorContentWidth))
-		header := lipgloss.NewStyle().
-			Width(editorContentWidth).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("8")).
-			Render(titleStyle.Render(filepath.Base(tab.path)) + m.renderGitBadge(tab.path) + "  " + mutedStyle.Render(tab.status) + m.renderInterpreterBadge(tab))
-		topBodyHeight = lipgloss.Height(tabBar) + lipgloss.Height(header) + editorBodyHeight
-		sidebar := panelStyle.Copy().Width(sidebarOuterWidth).Height(topBodyHeight).Render(
-			m.renderSidebar(sidebarContentWidth, topBodyHeight),
-		)
-		editorPane := activePanelStyle.Width(editorOuterWidth).Height(topBodyHeight).Render(
-			lipgloss.JoinVertical(lipgloss.Left, tabBar, header, tab.editor.View()),
-		)
-		top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " ", editorPane)
-
-		m.layout = editorLayout{
-			panelX:       appPaddingStyle.GetHorizontalFrameSize() / 2,
-			panelY:       appPaddingStyle.GetVerticalFrameSize() / 2,
-			panelWidth:   panelWidth,
-			topHeight:    lipgloss.Height(top),
-			bottomHeight: max(3, m.outputHeight) + panelStyle.GetVerticalFrameSize(),
-			tabBarY:      appPaddingStyle.GetVerticalFrameSize() / 2,
-			tabBarX:      appPaddingStyle.GetHorizontalFrameSize()/2 + sidebarOuterWidth + 1 + activePanelStyle.GetHorizontalFrameSize()/2,
-			tabBarWidth:  editorContentWidth,
-			sidebarX:     appPaddingStyle.GetHorizontalFrameSize() / 2,
-			sidebarY:     appPaddingStyle.GetVerticalFrameSize() / 2,
-			sidebarWidth: sidebarOuterWidth,
-		}
-		m.layout.bottomY = m.layout.panelY + m.layout.topHeight
-		m.layout.editorBodyY = m.layout.panelY + lipgloss.Height(tabBar) + lipgloss.Height(header) + activePanelStyle.GetVerticalFrameSize()/2 - 1
-		m.layout.editorX = m.layout.tabBarX
-		m.layout.editorWidth = editorContentWidth
-		m.layout.contentX = m.layout.panelX + panelStyle.GetHorizontalFrameSize()/2
-
-		bottomStyle := panelStyle.Copy().Width(panelWidth).Height(max(3, m.outputHeight))
-		bottom := bottomStyle.Render(tab.output.View())
-		footer := renderFooter(panelWidth, m.contextualFooter(), m.selectedAIModel, m.aiStatusText())
-		parts := []string{top, bottom}
-		if prompt := m.renderPrompt(panelWidth); prompt != "" {
-			parts = append(parts, prompt)
-		}
-		parts = append(parts, footer)
-		return appPaddingStyle.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
-	default:
-		return ""
-	}
-}
-
-func (m *appModel) resize() {
-	usableHeight := max(8, m.height-7)
-	m.editorHeight = int(float64(usableHeight) * 0.6)
-	if m.editorHeight < 4 {
-		m.editorHeight = 4
-	}
-	m.outputHeight = usableHeight - m.editorHeight
-	if m.outputHeight < 3 {
-		m.outputHeight = 3
-	}
-
-	m.welcome.SetSize(m.width, m.height)
-	m.picker.SetSize(max(10, m.width-6), max(6, m.height-6))
-	m.newFile.SetSize(m.width, m.height)
-	m.interpreterPicker.SetSize(m.width, m.height)
-	m.modelPicker.SetSize(m.width, m.height)
-	m.themePicker.SetSize(m.width, m.height)
-	m.commandPalette.SetSize(m.width, m.height)
-	for i := range m.tabs {
-		m.tabs[i].editor.SetSize(max(10, m.width-8), max(3, m.editorHeight-editorChromeRows))
-		m.tabs[i].output.SetSize(max(10, m.width-8), max(2, m.outputHeight-2))
-	}
-}
-
 func (m *appModel) openFile(path string) (int, error) {
 	path = pickerStartPath(path)
 	if m.workspaceRoot == "" {
@@ -1023,6 +818,7 @@ func (m *appModel) openFile(path string) (int, error) {
 		path:   path,
 		editor: editor.New(),
 		output: newOutputModel(),
+		runner: runner.New(),
 		status: fmt.Sprintf("Editing %s", filepath.Base(path)),
 	}
 	m.nextTabID++
@@ -1060,8 +856,9 @@ func (m *appModel) closeActiveTab() {
 	}
 
 	if m.tabs[m.activeTab].activeRunID != 0 {
-		m.runner.StopRun(m.tabs[m.activeTab].activeRunID)
+		m.tabs[m.activeTab].runner.StopRun(m.tabs[m.activeTab].activeRunID)
 	}
+	m.tabs[m.activeTab].runner.Stop()
 
 	m.tabs = append(m.tabs[:m.activeTab], m.tabs[m.activeTab+1:]...)
 	if len(m.tabs) == 0 {
@@ -1078,9 +875,9 @@ func (m *appModel) closeActiveTab() {
 	m.activateTab(m.activeTab)
 }
 
-func (m *appModel) startRunForTab(index int, status string) {
+func (m *appModel) startRunForTab(index int, status string) tea.Cmd {
 	if index < 0 || index >= len(m.tabs) {
-		return
+		return nil
 	}
 	tab := &m.tabs[index]
 	opts := runner.RunOptions{
@@ -1089,12 +886,13 @@ func (m *appModel) startRunForTab(index int, status string) {
 	if strings.EqualFold(filepath.Ext(tab.path), ".py") {
 		opts.PythonInterpreter = tab.pythonInterpreter
 	}
-	tab.activeRunID = m.runner.Start(tab.path, tab.editor.Content(), opts)
+	tab.activeRunID = tab.runner.Start(tab.path, tab.editor.Content(), opts)
 	tab.editor.ClearExecution()
 	tab.output.StartSession(status, m.runCommandLabel(*tab))
 	tab.output.ClearInput()
 	tab.output.SetInputFocus(false)
 	tab.status = status
+	return waitForRunnerEvent(tab.id, tab.runner)
 }
 
 func (m *appModel) bumpDebounce(index int) int {
@@ -1103,338 +901,6 @@ func (m *appModel) bumpDebounce(index int) int {
 	}
 	m.tabs[index].debounceToken++
 	return m.tabs[index].debounceToken
-}
-
-func (m *appModel) renderTabBar(width int) string {
-	if len(m.tabs) == 0 {
-		return ""
-	}
-
-	items := m.tabItems()
-	m.adjustTabScroll(width)
-	start, end := m.visibleTabRange(width)
-	rendered := make([]string, 0, end-start+3)
-	rendered = append(rendered, accentStyle.Render(fmt.Sprintf("Tabs %d:", len(m.tabs))))
-	if start > 0 {
-		rendered = append(rendered, mutedStyle.Render("‹"))
-	}
-	for i := start; i < end; i++ {
-		item := items[i]
-		label := item.label
-		if i == m.activeTab {
-			label = accentStyle.Render("[" + label + "]")
-		} else {
-			label = mutedStyle.Render(label)
-		}
-		rendered = append(rendered, label)
-	}
-	if end < len(items) {
-		rendered = append(rendered, mutedStyle.Render("›"))
-	}
-	bar := strings.Join(rendered, "  ")
-	if lipgloss.Width(bar) > width {
-		bar = truncateLabel(bar, max(1, width))
-	}
-	return bar
-}
-
-func (m *appModel) tabItems() []struct {
-	label string
-	index int
-} {
-	items := make([]struct {
-		label string
-		index int
-	}, 0, len(m.tabs))
-	for i, tab := range m.tabs {
-		label := filepath.Base(tab.path)
-		if status := m.gitStatus[tab.path]; status != "" {
-			label = status + " " + label
-		}
-		if tab.editor.Dirty() {
-			label += " *"
-		}
-		items = append(items, struct {
-			label string
-			index int
-		}{
-			label: truncateLabel(label, 20),
-			index: i,
-		})
-	}
-	return items
-}
-
-func (m *appModel) adjustTabScroll(width int) {
-	if m.activeTab < 0 || m.activeTab >= len(m.tabs) {
-		m.tabScroll = 0
-		return
-	}
-	start, end := m.visibleTabRange(width)
-	if m.activeTab < start {
-		m.tabScroll = m.activeTab
-		return
-	}
-	if m.activeTab >= end {
-		m.tabScroll = m.activeTab
-	}
-}
-
-func (m *appModel) visibleTabRange(width int) (int, int) {
-	items := m.tabItems()
-	if len(items) == 0 {
-		return 0, 0
-	}
-	if m.tabScroll < 0 {
-		m.tabScroll = 0
-	}
-	if m.tabScroll >= len(items) {
-		m.tabScroll = len(items) - 1
-	}
-	start := m.tabScroll
-	used := lipgloss.Width(fmt.Sprintf("Tabs %d:", len(items)))
-	if start > 0 {
-		used += lipgloss.Width("  ‹")
-	}
-	end := start
-	for end < len(items) {
-		itemWidth := lipgloss.Width(items[end].label) + 4
-		extra := itemWidth
-		if end < len(items)-1 {
-			extra += 2
-		}
-		if used+extra > width && end > start {
-			break
-		}
-		used += extra
-		end++
-		if used >= width {
-			break
-		}
-	}
-	if end < len(items) {
-		for end > start && used+lipgloss.Width("  ›") > width {
-			end--
-			used -= lipgloss.Width(items[end].label) + 6
-		}
-	}
-	if end <= start {
-		end = min(len(items), start+1)
-	}
-	return start, end
-}
-
-func (m *appModel) renderGitBadge(path string) string {
-	status := m.gitStatus[path]
-	if status == "" {
-		return ""
-	}
-	return "  " + mutedStyle.Render("["+status+"]")
-}
-
-func (m *appModel) tabHitboxes() []tabHitbox {
-	items := m.tabItems()
-	hitboxes := make([]tabHitbox, 0, len(items))
-	start, end := m.visibleTabRange(m.layout.tabBarWidth)
-	offset := lipgloss.Width(fmt.Sprintf("Tabs %d:", len(m.tabs))) + 2
-	if start > 0 {
-		offset += lipgloss.Width("‹") + 2
-	}
-	for _, item := range items[start:end] {
-		// Padding(0,1) + MarginRight(1)
-		width := lipgloss.Width(item.label) + 3
-		hitboxes = append(hitboxes, tabHitbox{
-			index: item.index,
-			start: offset,
-			end:   offset + width,
-		})
-		offset += width + 2
-	}
-	return hitboxes
-}
-
-func (m *appModel) handleMouseClick(x, y int) tea.Cmd {
-	if !m.hasActiveTab() {
-		return nil
-	}
-
-	layout := m.currentEditorLayout()
-
-	if x >= layout.sidebarX && x < layout.sidebarX+layout.sidebarWidth && y >= layout.sidebarY && y < layout.sidebarY+layout.topHeight {
-		row := y - layout.sidebarY - 2
-		visible := m.visibleSidebarEntries(max(1, layout.topHeight-4))
-		if row >= 0 && row < len(visible) {
-			entry := visible[row]
-			if !entry.isDir {
-				if _, err := m.openFile(entry.path); err == nil {
-					return nil
-				}
-			}
-		}
-		return nil
-	}
-
-	if y >= layout.panelY && y < layout.panelY+layout.topHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		if y >= layout.tabBarY && y < layout.tabBarY+2 {
-			relativeX := x - layout.tabBarX
-			for _, hitbox := range m.tabHitboxes() {
-				if (relativeX >= hitbox.start && relativeX < hitbox.end) ||
-					(relativeX-1 >= hitbox.start && relativeX-1 < hitbox.end) {
-					m.activateTab(hitbox.index)
-					return nil
-				}
-			}
-		}
-
-		m.tabs[m.activeTab].output.SetInputFocus(false)
-		m.focus = "editor"
-
-		if y >= layout.editorBodyY && x >= layout.editorX && x < layout.editorX+layout.editorWidth {
-			m.tabs[m.activeTab].editor.SetCursorFromView(y-layout.editorBodyY, x-layout.editorX)
-			m.tabs[m.activeTab].editor.BeginSelectionFromView(y-layout.editorBodyY, x-layout.editorX)
-		}
-		return nil
-	}
-
-	if y >= layout.bottomY && y < layout.bottomY+layout.bottomHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		viewRow := y - (layout.bottomY + 1)
-		col := x - layout.contentX
-		outputRows := m.tabs[m.activeTab].output.visibleOutputLineCount()
-		inputRow := m.tabs[m.activeTab].output.inputViewRow()
-		m.tabs[m.activeTab].output.SetInputFocus(viewRow == inputRow)
-		m.focus = "output"
-		if viewRow >= 1 && viewRow <= outputRows {
-			m.tabs[m.activeTab].output.BeginSelection(viewRow-1, col)
-		} else {
-			m.tabs[m.activeTab].output.ClearSelection()
-		}
-		return nil
-	}
-
-	return nil
-}
-
-func (m *appModel) handleMouseDrag(x, y int) {
-	if !m.hasActiveTab() {
-		return
-	}
-	layout := m.currentEditorLayout()
-	if y >= layout.panelY && y < layout.panelY+layout.topHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		if y >= layout.editorBodyY && x >= layout.editorX && x < layout.editorX+layout.editorWidth {
-			m.tabs[m.activeTab].editor.UpdateSelectionFromView(y-layout.editorBodyY, x-layout.editorX)
-		}
-		return
-	}
-	if y >= layout.bottomY && y < layout.bottomY+layout.bottomHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		viewRow := y - (layout.bottomY + 1)
-		col := x - layout.contentX
-		if viewRow >= 1 {
-			m.tabs[m.activeTab].output.UpdateSelection(viewRow-1, col)
-		}
-	}
-}
-
-func (m *appModel) handleMouseRelease() {
-	if !m.hasActiveTab() {
-		return
-	}
-	m.tabs[m.activeTab].editor.EndSelection()
-	m.tabs[m.activeTab].output.EndSelection()
-}
-
-func (m *appModel) renderInterpreterBadge(tab editorTab) string {
-	if !strings.EqualFold(filepath.Ext(tab.path), ".py") {
-		return ""
-	}
-
-	label := "auto"
-	if tab.pythonInterpreter != "" {
-		label = filepath.Base(tab.pythonInterpreter)
-		for _, item := range m.pythonInterpreters {
-			if item.Path == tab.pythonInterpreter {
-				label = item.Command
-				break
-			}
-		}
-	}
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	return "  " + style.Render("[py: "+label+"]")
-}
-
-func (m *appModel) runCommandLabel(tab editorTab) string {
-	base := filepath.Base(tab.path)
-	switch strings.ToLower(filepath.Ext(tab.path)) {
-	case ".py":
-		interpreter := "python"
-		if tab.pythonInterpreter != "" {
-			interpreter = filepath.Base(tab.pythonInterpreter)
-		}
-		return "➜ " + interpreter + " " + base
-	case ".go":
-		return "➜ go run " + base
-	default:
-		return "➜ " + base
-	}
-}
-
-func (m *appModel) handleMouseScroll(x, y, delta int) {
-	if !m.hasActiveTab() {
-		return
-	}
-
-	layout := m.currentEditorLayout()
-	if x >= layout.sidebarX && x < layout.sidebarX+layout.sidebarWidth && y >= layout.sidebarY && y < layout.sidebarY+layout.topHeight {
-		m.sidebarScroll += delta
-		if m.sidebarScroll < 0 {
-			m.sidebarScroll = 0
-		}
-		if len(m.sidebarEntries) > 0 {
-			m.sidebarScroll = min(m.sidebarScroll, max(0, len(m.sidebarEntries)-1))
-		}
-		return
-	}
-	if y >= layout.panelY && y < layout.panelY+layout.topHeight && x >= layout.panelX && x < layout.panelX+layout.panelWidth {
-		m.tabs[m.activeTab].editor.Scroll(delta)
-	}
-}
-
-func truncateLabel(label string, maxWidth int) string {
-	runes := []rune(label)
-	if len(runes) <= maxWidth {
-		return label
-	}
-	if maxWidth <= 1 {
-		return string(runes[:maxWidth])
-	}
-	return string(runes[:maxWidth-1]) + "…"
-}
-
-func (m *appModel) currentEditorLayout() editorLayout {
-	if m.layout.panelWidth != 0 {
-		return m.layout
-	}
-	panelWidth := max(20, m.width-4)
-	sidebarOuterWidth := min(32, max(20, panelWidth/4))
-	editorOuterWidth := max(20, panelWidth-sidebarOuterWidth-1)
-	editorContentWidth := max(10, editorOuterWidth-activePanelStyle.GetHorizontalFrameSize())
-	return editorLayout{
-		panelX:       appPaddingStyle.GetHorizontalFrameSize() / 2,
-		panelY:       appPaddingStyle.GetVerticalFrameSize() / 2,
-		panelWidth:   panelWidth,
-		topHeight:    max(3, m.editorHeight-editorChromeRows) + editorChromeRows + activePanelStyle.GetVerticalFrameSize(),
-		bottomY:      appPaddingStyle.GetVerticalFrameSize()/2 + max(3, m.editorHeight-editorChromeRows) + editorChromeRows + activePanelStyle.GetVerticalFrameSize(),
-		bottomHeight: max(3, m.outputHeight) + panelStyle.GetVerticalFrameSize(),
-		tabBarY:      appPaddingStyle.GetVerticalFrameSize() / 2,
-		tabBarX:      appPaddingStyle.GetHorizontalFrameSize()/2 + sidebarOuterWidth + 1 + activePanelStyle.GetHorizontalFrameSize()/2,
-		tabBarWidth:  editorContentWidth,
-		editorBodyY:  appPaddingStyle.GetVerticalFrameSize()/2 + editorChromeRows - 1,
-		contentX:     appPaddingStyle.GetHorizontalFrameSize()/2 + panelStyle.GetHorizontalFrameSize()/2,
-		sidebarX:     appPaddingStyle.GetHorizontalFrameSize() / 2,
-		sidebarY:     appPaddingStyle.GetVerticalFrameSize() / 2,
-		sidebarWidth: sidebarOuterWidth,
-		editorX:      appPaddingStyle.GetHorizontalFrameSize()/2 + sidebarOuterWidth + 1 + activePanelStyle.GetHorizontalFrameSize()/2,
-		editorWidth:  editorContentWidth,
-	}
 }
 
 func (m *appModel) pushScreen(s screen) {
@@ -1481,12 +947,6 @@ func scheduleRun(token, tabID int) tea.Cmd {
 	})
 }
 
-func waitForRunnerEvent(manager *runner.Manager) tea.Cmd {
-	return func() tea.Msg {
-		return <-manager.Events()
-	}
-}
-
 func scheduleAIThinkingTick() tea.Cmd {
 	return tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg {
 		return aiThinkingTickMsg{}
@@ -1497,276 +957,6 @@ func waitForAIStream(events <-chan aiStreamEvent) tea.Cmd {
 	return func() tea.Msg {
 		return aiStreamMsg{event: <-events}
 	}
-}
-
-func (m *appModel) openFindPrompt() {
-	findValue := ""
-	if m.tabs[m.activeTab].editor.HasSelection() {
-		findValue = m.tabs[m.activeTab].editor.SelectedText()
-	}
-	m.prompt = inlinePrompt{
-		mode:  promptFind,
-		title: "Find / Replace",
-		hint:  "enter next • shift+enter previous • alt+enter replace all • tab switch field • esc close",
-		fields: []promptField{
-			{label: "Find", value: []rune(findValue)},
-			{label: "Replace"},
-		},
-	}
-}
-
-func (m *appModel) openGotoPrompt() {
-	m.prompt = inlinePrompt{
-		mode:  promptGoto,
-		title: "Jump To Line",
-		hint:  "type a 1-based line number and press enter",
-		fields: []promptField{
-			{label: "Line", value: []rune(fmt.Sprintf("%d", m.tabs[m.activeTab].editor.CurrentCursorLine()))},
-		},
-	}
-}
-
-func (m *appModel) handlePromptKey(key tea.KeyMsg) (bool, tea.Cmd) {
-	switch key.String() {
-	case "esc":
-		m.prompt = inlinePrompt{}
-		m.tabs[m.activeTab].status = "Prompt closed"
-		return true, nil
-	case "tab":
-		if len(m.prompt.fields) > 0 {
-			m.prompt.activeField = (m.prompt.activeField + 1) % len(m.prompt.fields)
-		}
-		return true, nil
-	case "shift+tab":
-		if len(m.prompt.fields) > 0 {
-			m.prompt.activeField = (m.prompt.activeField - 1 + len(m.prompt.fields)) % len(m.prompt.fields)
-		}
-		return true, nil
-	case "backspace":
-		field := &m.prompt.fields[m.prompt.activeField]
-		if len(field.value) > 0 {
-			field.value = field.value[:len(field.value)-1]
-		}
-		return true, nil
-	case "enter":
-		return true, m.submitPrompt(true, false)
-	case "shift+enter":
-		return true, m.submitPrompt(false, false)
-	case "alt+enter":
-		return true, m.submitPrompt(true, true)
-	}
-	if key.Type == tea.KeyRunes || key.Type == tea.KeySpace {
-		m.appendToPromptField(key.String())
-		return true, nil
-	}
-	return false, nil
-}
-
-func (m *appModel) submitPrompt(forward, replaceAll bool) tea.Cmd {
-	switch m.prompt.mode {
-	case promptFind:
-		find := strings.TrimSpace(string(m.prompt.fields[0].value))
-		replace := string(m.prompt.fields[1].value)
-		if find == "" {
-			m.tabs[m.activeTab].status = "Enter text to find"
-			return nil
-		}
-		if replaceAll && replace != "" {
-			count := m.tabs[m.activeTab].editor.ReplaceAll(find, replace)
-			if count == 0 {
-				m.tabs[m.activeTab].status = fmt.Sprintf("No matches for %q", find)
-				return nil
-			}
-			m.tabs[m.activeTab].status = fmt.Sprintf("Replaced %d match(es)", count)
-			return scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
-		}
-		if replace != "" && m.tabs[m.activeTab].editor.ReplaceSelection(find, replace) {
-			cmd := scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
-			if m.tabs[m.activeTab].editor.FindNext(find, true) {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Replaced %q and moved to next match", find)
-			} else {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Replaced final %q", find)
-			}
-			return cmd
-		}
-		if m.tabs[m.activeTab].editor.FindNext(find, forward) {
-			if forward {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Found next %q", find)
-			} else {
-				m.tabs[m.activeTab].status = fmt.Sprintf("Found previous %q", find)
-			}
-			return nil
-		}
-		m.tabs[m.activeTab].status = fmt.Sprintf("No matches for %q", find)
-		return nil
-	case promptGoto:
-		lineText := strings.TrimSpace(string(m.prompt.fields[0].value))
-		line := 0
-		_, err := fmt.Sscanf(lineText, "%d", &line)
-		if err != nil || line <= 0 {
-			m.tabs[m.activeTab].status = "Enter a valid line number"
-			return nil
-		}
-		if !m.tabs[m.activeTab].editor.JumpToLine(line) {
-			m.tabs[m.activeTab].status = fmt.Sprintf("Line %d is out of range", line)
-			return nil
-		}
-		m.tabs[m.activeTab].status = fmt.Sprintf("Jumped to line %d", line)
-		m.prompt = inlinePrompt{}
-		return nil
-	default:
-		return nil
-	}
-}
-
-func (m *appModel) appendToPromptField(text string) {
-	if m.prompt.mode == promptNone || len(m.prompt.fields) == 0 || text == "" {
-		return
-	}
-	m.prompt.fields[m.prompt.activeField].value = append(m.prompt.fields[m.prompt.activeField].value, []rune(text)...)
-}
-
-func (m *appModel) renderPrompt(width int) string {
-	if m.prompt.mode == promptNone {
-		return ""
-	}
-	parts := []string{accentStyle.Render(m.prompt.title)}
-	for i, field := range m.prompt.fields {
-		value := string(field.value)
-		label := field.label + ": "
-		style := mutedStyle
-		if i == m.prompt.activeField {
-			style = accentStyle
-			value += "_"
-		}
-		parts = append(parts, style.Render(label+value))
-	}
-	if m.prompt.hint != "" {
-		parts = append(parts, mutedStyle.Render(m.prompt.hint))
-	}
-	return panelStyle.Copy().Width(width).Render(strings.Join(parts, "  "))
-}
-
-func (m *appModel) openModelPicker() bool {
-	options := availableAIModels(m.config)
-	if len(options) == 0 {
-		m.status = "Set Gemini, OpenAI, or Anthropic keys in env vars or config.toml to enable AI models."
-		return false
-	}
-	if len(options) == 1 || onlyOneAIProvider(options) {
-		provider, model := options[0].provider, options[0].model
-		m.aiClient.SetModel(provider, model)
-		m.selectedAIModel = m.aiClient.Model()
-		m.status = fmt.Sprintf("AI model set to %s", m.selectedAIModel)
-		return true
-	}
-
-	m.modelPicker = newModelPickerModel(options, m.selectedAIModel)
-	m.modelPicker.SetSize(m.width, m.height)
-	m.pushScreen(m.screen)
-	m.screen = screenModelPicker
-	return true
-}
-
-func (m *appModel) openThemePicker() {
-	options := availableEditorThemes(m.customThemeLoaded)
-	m.themePicker = newThemePickerModel(options, m.selectedTheme)
-	m.themePicker.SetSize(m.width, m.height)
-	m.pushScreen(m.screen)
-	m.screen = screenThemePicker
-}
-
-func (m *appModel) executeCommandAction(action string) tea.Cmd {
-	switch action {
-	case "save":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			tab := &m.tabs[m.activeTab]
-			if err := os.WriteFile(tab.path, []byte(tab.editor.Content()), 0o644); err != nil {
-				tab.status = err.Error()
-				return nil
-			}
-			tab.editor.MarkSaved()
-			m.refreshWorkspaceView()
-			tab.status = fmt.Sprintf("Saved %s", filepath.Base(tab.path))
-			m.startRunForTab(m.activeTab, "Saved and running...")
-		}
-	case "undo":
-		if m.screen == screenEditor && m.hasActiveTab() && m.tabs[m.activeTab].editor.Undo() {
-			m.tabs[m.activeTab].status = "Undo"
-			return scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
-		}
-	case "redo":
-		if m.screen == screenEditor && m.hasActiveTab() && m.tabs[m.activeTab].editor.Redo() {
-			m.tabs[m.activeTab].status = "Redo"
-			return scheduleRun(m.bumpDebounce(m.activeTab), m.tabs[m.activeTab].id)
-		}
-	case "find":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			m.openFindPrompt()
-		}
-	case "goto":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			m.openGotoPrompt()
-		}
-	case "open_file":
-		root := pickerStartPath("")
-		if m.hasActiveTab() {
-			root = pickerStartPath(filepath.Dir(m.tabs[m.activeTab].path))
-		}
-		m.picker = filepicker.New(root, filepicker.PickFile)
-		m.picker.SetSize(m.width-6, m.height-6)
-		m.pushScreen(m.screen)
-		m.screen = screenPicker
-	case "open_folder":
-		m.picker = filepicker.New(pickerStartPath(""), filepicker.PickDirectory)
-		m.picker.SetSize(m.width-6, m.height-6)
-		m.pushScreen(m.screen)
-		m.screen = screenPicker
-	case "new_file":
-		m.newFile = newNewFileModel(m.defaultCreateDir())
-		m.newFile.SetSize(m.width, m.height)
-		m.pushScreen(m.screen)
-		m.screen = screenNewFile
-	case "close_tab":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			m.closeActiveTab()
-		}
-	case "next_tab":
-		if m.screen == screenEditor && len(m.tabs) > 1 {
-			m.activateTab((m.activeTab + 1) % len(m.tabs))
-		}
-	case "prev_tab":
-		if m.screen == screenEditor && len(m.tabs) > 1 {
-			m.activateTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
-		}
-	case "explain_error":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			return m.startAIErrorExplanation(m.activeTab)
-		}
-	case "ai_hint":
-		if m.screen == screenEditor && m.hasActiveTab() {
-			return m.startAIHint(m.activeTab)
-		}
-	case "interpreter_picker":
-		if m.screen == screenEditor && m.hasActiveTab() && strings.EqualFold(filepath.Ext(m.tabs[m.activeTab].path), ".py") {
-			m.interpreterPicker = newInterpreterPickerModel(m.pythonInterpreters, m.tabs[m.activeTab].pythonInterpreter)
-			m.interpreterPicker.SetSize(m.width, m.height)
-			m.pushScreen(m.screen)
-			m.screen = screenInterpreterPicker
-		}
-	case "model_picker":
-		if m.screen == screenEditor {
-			m.openModelPicker()
-		}
-	case "theme_picker":
-		if m.screen == screenEditor {
-			m.openThemePicker()
-		}
-	case "quit":
-		m.runner.Stop()
-		return tea.Quit
-	}
-	return nil
 }
 
 func (m *appModel) startAIErrorExplanation(index int) tea.Cmd {
@@ -1970,70 +1160,4 @@ func onlyOneAIProvider(items []aiModelOption) bool {
 		}
 	}
 	return true
-}
-
-func renderFooter(width int, left, model, thinking string) string {
-	leftRendered := mutedStyle.Render(left)
-	rightText := model
-	if thinking != "" {
-		if rightText != "" {
-			rightText = thinking + "  " + rightText
-		} else {
-			rightText = thinking
-		}
-	}
-	if rightText == "" {
-		return lipgloss.NewStyle().Width(width).Render(leftRendered)
-	}
-
-	rightRendered := mutedStyle.Render(rightText)
-	leftWidth := lipgloss.Width(leftRendered)
-	rightWidth := lipgloss.Width(rightRendered)
-	if leftWidth+rightWidth+1 > width {
-		return lipgloss.NewStyle().Width(width).Render(leftRendered)
-	}
-
-	return lipgloss.NewStyle().Width(width).Render(leftRendered + strings.Repeat(" ", width-leftWidth-rightWidth) + rightRendered)
-}
-
-func (m *appModel) contextualFooter() string {
-	switch m.screen {
-	case screenEditor:
-		if !m.hasActiveTab() {
-			return "ctrl+s save • ctrl+f find • ctrl+p commands"
-		}
-		tab := m.tabs[m.activeTab]
-		status := strings.ToLower(tab.output.Status())
-		if tab.activeRunID == 0 && tab.output.StderrText() != "" && (strings.Contains(status, "finished") || strings.Contains(status, "timed out")) {
-			return "ctrl+e explain • ctrl+s save • ctrl+p commands"
-		}
-		if tab.editor.Dirty() {
-			return "ctrl+s save • ctrl+z undo • ctrl+p commands"
-		}
-		if m.focus == "output" {
-			return "ctrl+c copy • ctrl+l input • ctrl+p commands"
-		}
-		return "ctrl+s save • ctrl+f find • ctrl+p commands"
-	case screenWelcome:
-		return "enter open • n new file • ctrl+q quit"
-	default:
-		return "esc back • enter select • ↑↓ navigate"
-	}
-}
-
-var aiThinkingFrames = []string{
-	"[Thinking   ]",
-	"[Thinking.  ]",
-	"[Thinking.. ]",
-	"[Thinking...]",
-}
-
-func (m *appModel) aiStatusText() string {
-	if !m.aiLoading {
-		return ""
-	}
-	if m.aiThinkingFrame < 0 || m.aiThinkingFrame >= len(aiThinkingFrames) {
-		return aiThinkingFrames[0]
-	}
-	return aiThinkingFrames[m.aiThinkingFrame]
 }
