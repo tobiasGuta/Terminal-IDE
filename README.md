@@ -1,27 +1,35 @@
 # Terminal IDE
 
-A terminal-based IDE written in Go using Bubble Tea, Lip Gloss, and Chroma. It includes a split editor/output layout, live execution for Python and Go, Python execution tracing, live stdin support, and optional AI-powered error explanations and hints.
+A terminal IDE written in Go with Bubble Tea, Lip Gloss, and Chroma. It combines a code editor, live runner, workspace browser, and optional AI assistance in a single TUI for Python and Go.
 
 <img width="1415" height="711" alt="image" src="https://github.com/user-attachments/assets/a828455d-fb1a-4adc-b410-0aa377cf91ba" />
 
 
 ## Features
 
-- Welcome screen with keyboard-driven `Open File`, `Open Folder`, and `Create New File`
-- Multiple open files with tabs
-- Split editor and live output layout
+- Welcome screen with `Open File`, `Open Folder`, and `Create New File`
+- Multi-tab editor with dirty-state tracking and tab overflow handling
+- Persistent workspace sidebar for browsing the current folder tree
+- Git status indicators in the sidebar, tabs, and file header
+- Split editor and live output layout with capped output scrollback
 - Debounced live execution for `.py` and `.go`
-- Real-time stdout/stderr streaming into the output pane
-- Live stdin input for programs that prompt with `input()` or `raw_input()`
+- Real-time stdout/stderr streaming plus live stdin input
 - Python execution tracing with a live execution pointer in the editor
-- Manual Python interpreter override per tab, alongside auto-detection
-- Clipboard copy/paste for the editor, live input, and selected live output text
-- Mouse click support for focusing the editor or output pane
-- Mouse drag selection in the live output pane
-- AI Error Decoder via `Ctrl+E`
-- Socratic AI hints via `Ctrl+H`
-- AI model selection via `Alt+M`
-- Google Gemini, OpenAI, and Anthropic support with automatic provider selection
+- Per-tab Python interpreter override alongside auto-detection
+- Editor quality-of-life features:
+  - undo/redo
+  - find/replace
+  - jump to line
+  - auto-indent
+  - bracket and quote auto-close
+  - block selection mode
+- Mouse support for editor cursor placement, pane focus, and output selection
+- Context-aware footer hints instead of a full static shortcut dump
+- Command palette via `Ctrl+P` or `?`
+- Optional AI error explanations and hints with streaming responses
+- Google Gemini, OpenAI, and Anthropic support
+- Config file support for AI keys and default model selection
+- Unit tests covering runner, editor, AI client, config, and file picker behavior
 
 ## Build
 
@@ -35,6 +43,32 @@ go build ./cmd/ide
 ```bash
 go run ./cmd/ide
 ```
+
+## Test
+
+```bash
+go test ./...
+```
+
+If you are running in a restricted environment where the default Go cache path is not writable, use:
+
+```bash
+GOCACHE=$(pwd)/.gocache go test ./...
+```
+
+## Workspace and File Picking
+
+- `Open File` and `Open Folder` start from your current working directory, but you can browse outside it
+- After choosing a folder as a workspace, the follow-up file picker is rooted to that folder
+- The sidebar shows that workspace as a persistent tree so you can switch files without reopening the picker
+
+## Runner
+
+- Python and Go run through a pluggable language runner registry instead of a hard-coded switch
+- Runs have a default 30 second timeout, and timed-out executions are reported in the UI
+- Python uses inline execution for small scripts instead of always writing a temp source file
+- If `bwrap` is installed, runs use a best-effort Bubblewrap sandbox with network unshared and the filesystem mostly read-only
+- If `bwrap` is unavailable, execution falls back to the normal local process model
 
 ## AI Setup
 
@@ -59,6 +93,16 @@ openai_api_key = "your-openai-api-key"
 anthropic_api_key = "your-anthropic-api-key"
 preferred_ai_model = "claude-3-5-sonnet-latest"
 ```
+
+Environment variables override config-file values:
+
+- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `TERMINAL_IDE_AI_RATE_LIMIT`
+- `TERMINAL_IDE_AI_PROMPTS_FILE`
+- `TERMINAL_IDE_EXPLAIN_SYSTEM_PROMPT`
+- `TERMINAL_IDE_HINT_SYSTEM_PROMPT`
 
 ### Recommended: Google Gemini
 
@@ -114,6 +158,7 @@ Available Anthropic models:
 - Start the app with `go run ./cmd/ide`
 - Use the welcome screen to open a file, open a folder, or create a new file
 - Type directly in the editor pane
+- Use the sidebar to switch files inside the active workspace
 - The app automatically reruns supported files after a short debounce when you edit
 
 ### Running Code
@@ -122,6 +167,7 @@ Available Anthropic models:
 - Saved files can also be rerun with `Ctrl+S`
 - Stdout and stderr appear in the lower output pane
 - If your program waits for input, use `Ctrl+L` to focus the live input area, type your response, and press `Enter`
+- Long-running programs stop automatically when they hit the max runtime
 
 ### Python Tracing
 
@@ -146,7 +192,8 @@ Notes:
 
 - This is manual only; it does not auto-trigger on every error
 - If there is no error output to analyze, nothing is sent
-- AI requests are rate-limited to one request every 10 seconds per tab
+- AI requests are rate-limited globally by the AI client
+- The request includes the traceback plus a focused code window around the relevant line instead of the full file
 
 ### AI Hints
 
@@ -172,7 +219,7 @@ While an AI request is running:
 
 - the UI stays responsive
 - a `[Thinking...]` indicator appears in the footer
-- the result is appended when the request finishes
+- streamed AI chunks are appended live as they arrive
 
 ### AI Model Picker
 
@@ -181,13 +228,34 @@ Use `Alt+M` from the editor screen to choose the active AI model for the current
 Behavior:
 
 - If only one provider is configured, the app auto-selects that provider's first model
-- If both Gemini and OpenAI are configured, a picker opens
+- If multiple providers are configured, a picker opens
 - The active model name is shown in muted text on the right side of the footer
 - If no AI key is configured, the status bar tells you to set AI keys in env vars or config
+
+### Command Palette
+
+Use `Ctrl+P` or `?` to open the command palette.
+
+Behavior:
+
+- Search uses case-insensitive fuzzy subsequence matching
+- `Enter` runs the selected command
+- `Esc` or `Ctrl+P` closes the palette
+- The palette includes navigation, editing, AI, theme, interpreter, and file-management commands
+
+### Footer Hints
+
+The footer is contextual and shows only a few shortcuts relevant to the current screen or focus state.
 
 ## Keyboard Shortcuts
 
 - `Ctrl+S` save and rerun
+- `Ctrl+Z` undo
+- `Ctrl+Y` redo
+- `Ctrl+F` find and replace
+- `Ctrl+G` go to line
+- `Ctrl+P` command palette
+- `?` open command palette
 - `Ctrl+O` open file picker
 - `Ctrl+W` close current tab
 - `Shift+Tab` previous tab
@@ -199,6 +267,9 @@ Behavior:
 - `Ctrl+E` request AI error explanation from the current error output
 - `Ctrl+H` request an AI code hint
 - `Alt+M` open the AI model picker
+- `Alt+T` open the theme picker
+- `Alt+B` toggle block selection
+- `n` create a new file from the welcome screen
 - `Esc` return to welcome menu
 - `Ctrl+Q` quit
 
@@ -208,6 +279,7 @@ The AI layer handles common API failures with friendly messages.
 
 - Gemini `429`: rate limit reached
 - OpenAI `429`: rate limit reached
+- Anthropic `429`: rate limit reached
 - `4xx`: likely API key or request issue
 - `5xx`: temporary service issue
 - timeout: connection or service delay
@@ -225,10 +297,10 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 - Python tabs can override `auto` mode by opening the interpreter selector with `Ctrl+R`
 - Python files are launched in unbuffered mode so prompts from `input()` and `raw_input()` show immediately
 - Python runs emit live execution-line events so the editor can highlight the current line and pause on blocking input
-- `Open Folder` lets you choose a directory first, then browse files inside it
-- The file picker is rooted to the directory you opened, so it cannot browse above that boundary
+- The output pane keeps a bounded scrollback instead of growing without limit
+- The general file picker can browse outside the launch directory
+- The workspace file picker stays rooted to the folder you explicitly opened
 - `Ctrl+M` is not used for the AI model picker because many terminals treat it as `Enter`
 
 ## Screenshots
-
 
