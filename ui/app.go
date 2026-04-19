@@ -35,21 +35,6 @@ type debounceMsg struct {
 	token int
 }
 
-type aiResultMsg struct {
-	tabIndex    int
-	content     string
-	header      string
-	headerColor string
-}
-
-type aiResponseMsg struct {
-	tabIndex    int
-	text        string
-	err         error
-	header      string
-	headerColor string
-}
-
 type aiThinkingTickMsg struct{}
 
 type aiStreamEvent struct {
@@ -211,29 +196,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runnerEventMsg:
 		return m, m.handleRunnerEvent(msg)
-
-	case aiResultMsg:
-		if msg.tabIndex >= 0 && msg.tabIndex < len(m.tabs) && msg.content != "" {
-			m.tabs[msg.tabIndex].output.AppendAIBlock(msg.header, msg.headerColor, msg.content)
-			m.tabs[msg.tabIndex].status = "AI response ready"
-		}
-		return m, nil
-
-	case aiResponseMsg:
-		m.aiLoading = false
-		m.aiThinkingFrame = 0
-		m.aiThinkingTab = -1
-		if msg.tabIndex >= 0 && msg.tabIndex < len(m.tabs) {
-			content := strings.TrimSpace(msg.text)
-			if msg.err != nil {
-				content = formatAIError(msg.err)
-			}
-			if content != "" {
-				m.tabs[msg.tabIndex].output.AppendAIBlock(msg.header, msg.headerColor, content)
-				m.tabs[msg.tabIndex].status = "AI response ready"
-			}
-		}
-		return m, nil
 
 	case aiStreamMsg:
 		event := msg.event
