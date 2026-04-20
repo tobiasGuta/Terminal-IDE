@@ -47,7 +47,7 @@ func (m *appModel) View() string {
 		editorBodyHeight := max(3, m.editorHeight-editorChromeRows)
 		sidebarOuterWidth := min(32, max(20, panelWidth/4))
 		maxEditorContentWidth := max(131, int(float64(panelWidth)*0.77))
-		availableEditorOuterWidth := max(20, panelWidth-sidebarOuterWidth-1)
+		availableEditorOuterWidth := max(20, panelWidth-sidebarOuterWidth-panelStyle.GetHorizontalFrameSize())
 		editorOuterWidth := min(availableEditorOuterWidth, maxEditorContentWidth+activePanelStyle.GetHorizontalFrameSize())
 		sidebarContentWidth := max(10, sidebarOuterWidth-panelStyle.GetHorizontalFrameSize())
 		editorContentWidth := max(10, editorOuterWidth-activePanelStyle.GetHorizontalFrameSize())
@@ -301,7 +301,7 @@ func (m *appModel) currentEditorLayout() editorLayout {
 	panelWidth := max(20, m.width-4)
 	sidebarOuterWidth := min(32, max(20, panelWidth/4))
 	maxEditorContentWidth := max(131, int(float64(panelWidth)*0.77))
-	availableEditorOuterWidth := max(20, panelWidth-sidebarOuterWidth-1)
+	availableEditorOuterWidth := max(20, panelWidth-sidebarOuterWidth-panelStyle.GetHorizontalFrameSize())
 	editorOuterWidth := min(availableEditorOuterWidth, maxEditorContentWidth+activePanelStyle.GetHorizontalFrameSize())
 	editorContentWidth := max(10, editorOuterWidth-activePanelStyle.GetHorizontalFrameSize())
 	return editorLayout{

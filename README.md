@@ -313,3 +313,43 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
 - `Ctrl+M` is not used for the AI model picker because many terminals treat it as `Enter`
 
 ## Screenshots
+#### Menu
+
+<img width="1912" height="994" alt="image" src="https://github.com/user-attachments/assets/dbcec4a2-2e83-4472-b154-213b760bb5eb" />
+
+----
+
+#### Selecting files
+
+<img width="1912" height="994" alt="image" src="https://github.com/user-attachments/assets/1f3854de-294c-45e8-9f76-c1f1e146d87b" />
+
+----
+
+#### Editor
+
+<img width="1912" height="994" alt="image" src="https://github.com/user-attachments/assets/de72d946-d188-4c3c-b48b-d3e2a900706e" />
+
+----
+
+#### More Files and commands
+
+https://github.com/user-attachments/assets/16f5eb63-738d-42bf-8021-7e635ddb9606
+
+----
+
+#### Find Command
+
+https://github.com/user-attachments/assets/a6d9f257-9b32-4f34-ad3a-bdbda9da9fb8
+
+----
+
+#### trace and errors
+
+https://github.com/user-attachments/assets/5222c9cc-aa4c-468a-b3a6-d0913bf26efe
+
+----
+
+#### AI
+
+https://github.com/user-attachments/assets/a383c30c-a40c-4cef-86dc-43a8bcde25b1
+
