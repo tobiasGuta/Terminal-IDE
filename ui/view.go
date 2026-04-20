@@ -54,6 +54,11 @@ func (m *appModel) View() string {
 		topBodyHeight := lipgloss.Height("x") + lipgloss.Height("x") + editorBodyHeight
 		tab.editor.SetSize(editorContentWidth, editorBodyHeight)
 		tab.output.SetSize(max(10, panelWidth-4), max(2, m.outputHeight-2))
+		if venv := m.installVenvLabel(); venv != "" {
+			tab.output.SetHeaderNote("venv: " + venv)
+		} else {
+			tab.output.SetHeaderNote("")
+		}
 		m.refreshWorkspaceView()
 		m.ensureSidebarEntryVisible(tab.path, editorBodyHeight)
 		tabBar := lipgloss.NewStyle().
@@ -270,7 +275,9 @@ func (m *appModel) renderInterpreterBadge(tab editorTab) string {
 	}
 
 	label := "auto"
-	if tab.pythonInterpreter != "" {
+	if m.activeVenvPath != "" {
+		label = filepath.Base(m.activeVenvPath)
+	} else if tab.pythonInterpreter != "" {
 		label = filepath.Base(tab.pythonInterpreter)
 		for _, item := range m.pythonInterpreters {
 			if item.Path == tab.pythonInterpreter {

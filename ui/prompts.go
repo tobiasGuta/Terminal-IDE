@@ -122,6 +122,30 @@ func (m *appModel) submitPrompt(forward, replaceAll bool) tea.Cmd {
 		m.tabs[m.activeTab].status = fmt.Sprintf("Jumped to line %d", line)
 		m.prompt = inlinePrompt{}
 		return nil
+	case promptInstallPackage:
+		pkg := strings.TrimSpace(string(m.prompt.fields[0].value))
+		if pkg == "" {
+			m.tabs[m.activeTab].status = "Enter a package name"
+			return nil
+		}
+		m.installPackage = pkg
+		m.openInstallVenvPrompt()
+		return nil
+	case promptInstallVenvConfirm:
+		answer := strings.ToLower(strings.TrimSpace(string(m.prompt.fields[0].value)))
+		if answer == "y" || answer == "yes" {
+			m.openInstallVenvNamePrompt()
+			return nil
+		}
+		m.prompt = inlinePrompt{}
+		return m.startPackageInstall(m.activeTab, m.installPackage, false, "")
+	case promptInstallVenvName:
+		envName := strings.TrimSpace(string(m.prompt.fields[0].value))
+		if envName == "" {
+			envName = ".venv"
+		}
+		m.prompt = inlinePrompt{}
+		return m.startPackageInstall(m.activeTab, m.installPackage, true, envName)
 	default:
 		return nil
 	}

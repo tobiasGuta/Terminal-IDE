@@ -110,3 +110,13 @@ func TestOutputModelHorizontalScrollChangesVisibleSlice(t *testing.T) {
 		t.Fatalf("expected scrolled visible slice, got %q", got)
 	}
 }
+
+func TestOutputModelRendersMissingModulePrompt(t *testing.T) {
+	m := newOutputModel()
+	m.SetSize(80, 6)
+	m.SetMissingModulePrompt("requests")
+	view := m.View()
+	if !strings.Contains(view, "Missing module 'requests'") {
+		t.Fatalf("expected missing-module prompt, got %q", view)
+	}
+}

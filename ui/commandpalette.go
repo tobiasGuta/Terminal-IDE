@@ -44,6 +44,7 @@ func newCommandPaletteModel() commandPaletteModel {
 			{Label: "Open File", Keybind: "ctrl+o", Action: "open_file"},
 			{Label: "Open Folder", Keybind: "welcome", Action: "open_folder"},
 			{Label: "Create New File", Keybind: "n", Action: "new_file"},
+			{Label: "Install Package", Keybind: "ctrl+i", Action: "install_package"},
 			{Label: "Close Tab", Keybind: "ctrl+w", Action: "close_tab"},
 			{Label: "Next Tab", Keybind: "tab / ctrl+]", Action: "next_tab"},
 			{Label: "Previous Tab", Keybind: "shift+tab", Action: "prev_tab"},

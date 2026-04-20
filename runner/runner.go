@@ -106,6 +106,27 @@ func (m *Manager) Start(path, content string, opts RunOptions) int {
 	return id
 }
 
+func (m *Manager) StartCommand(command string, args []string, dir string, opts RunOptions) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.stdin != nil {
+		_ = m.stdin.Close()
+		m.stdin = nil
+	}
+
+	m.seq++
+	id := m.seq
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
+	go m.runCommand(ctx, id, command, args, dir, opts)
+	return id
+}
+
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,6 +194,30 @@ func (m *Manager) run(ctx context.Context, id int, path, content string, opts Ru
 		defer prepared.cleanup()
 	}
 	cmd := prepared.cmd
+	m.executeCommand(ctx, id, cmd, opts)
+}
+
+func (m *Manager) runCommand(ctx context.Context, id int, command string, args []string, dir string, opts RunOptions) {
+	m.events <- StartedMsg{ID: id}
+	if opts.MaxRuntime > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.MaxRuntime)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Env = append([]string{}, os.Environ()...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	m.executeCommand(ctx, id, cmd, opts)
+}
+
+func (m *Manager) executeCommand(ctx context.Context, id int, cmd *exec.Cmd, opts RunOptions) {
+	if cmd == nil {
+		m.events <- FinishedMsg{ID: id, Err: fmt.Errorf("missing command")}
+		return
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -206,9 +251,13 @@ func (m *Manager) run(ctx context.Context, id int, path, content string, opts Ru
 	err = cmd.Wait()
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		timeout := opts.MaxRuntime.Round(time.Second)
+		if timeout <= 0 {
+			timeout = time.Second
+		}
 		m.events <- FinishedMsg{
 			ID:       id,
-			Err:      fmt.Errorf("run timed out after %s", opts.MaxRuntime.Round(time.Second)),
+			Err:      fmt.Errorf("run timed out after %s", timeout),
 			TimedOut: true,
 		}
 		return

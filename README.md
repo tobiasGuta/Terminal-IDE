@@ -17,6 +17,10 @@ A terminal IDE written in Go with Bubble Tea, Lip Gloss, and Chroma. It combines
 - Real-time stdout/stderr streaming plus live stdin input
 - Python execution tracing with a live execution pointer in the editor
 - Per-tab Python interpreter override alongside auto-detection
+- Integrated package installer (`Ctrl+I`) with streamed pip output
+- Missing-module detection (`ModuleNotFoundError`) with inline install prompt
+- Optional venv setup wizard during install, with session-level venv activation
+- Output header venv indicator when active (for example: `Live Output [venv: .venv]`)
 - Editor quality-of-life features:
   - undo/redo
   - find/replace
@@ -172,6 +176,27 @@ Available Anthropic models:
 - If your program waits for input, use `Ctrl+L` to focus the live input area, type your response, and press `Enter`
 - Long-running programs stop automatically when they hit the max runtime
 - When output lines are wider than the pane, focus the output and use `Left` / `Right` to scroll horizontally
+- If Python stderr includes `ModuleNotFoundError: No module named '<name>'`, the output pane shows:
+  - `⚠ Missing module '<name>' — press Enter to install, Esc to dismiss`
+  - `Enter` opens the install wizard with that module prefilled
+
+### Installing Packages
+
+Use `Ctrl+I` (or Command Palette → `Install Package`) from the editor screen.
+
+Flow:
+
+- Step 1: `Package name (e.g. requests, or -r requirements.txt)`
+- Step 2: `Run in virtual environment? (y/N)`
+- Step 3 (if `y`): `Virtual env name (default: .venv)`
+
+Execution behavior:
+
+- Installs run through a dedicated installer runner, separate from the code runner
+- Installer stdout/stderr streams into the existing output panel
+- Status shows `Installing...`, then `Done` or `Error`
+- If a venv is created, the session switches to `<venv>/bin/python` for subsequent Python runs
+- Active venv is shown in the output header as `[venv: <name>]`
 
 ### Python Tracing
 
@@ -245,7 +270,7 @@ Behavior:
 - Search uses case-insensitive fuzzy subsequence matching
 - `Enter` runs the selected command
 - `Esc` or `Ctrl+P` closes the palette
-- The palette includes navigation, editing, AI, theme, interpreter, and file-management commands
+- The palette includes navigation, editing, package install, AI, theme, interpreter, and file-management commands
 
 ### Footer Hints
 
@@ -265,6 +290,7 @@ GitHub Actions runs `go test ./...` on pushes and pull requests.
 - `Ctrl+G` go to line
 - `Ctrl+P` command palette
 - `?` open command palette
+- `Ctrl+I` install package
 - `Ctrl+O` open file picker
 - `Ctrl+W` close current tab
 - `Shift+Tab` previous tab
@@ -305,6 +331,7 @@ Gemini requests also use exponential backoff retry logic for `429` and `503`.
   - explicit shebangs like `#!/usr/bin/env python2` are respected
   - otherwise the app probes available Python interpreters and falls back to syntax hints
 - Python tabs can override `auto` mode by opening the interpreter selector with `Ctrl+R`
+- If a venv is activated through the install wizard, its interpreter takes priority for the rest of the session
 - Python files are launched in unbuffered mode so prompts from `input()` and `raw_input()` show immediately
 - Python runs emit live execution-line events so the editor can highlight the current line and pause on blocking input
 - The output pane keeps a bounded scrollback instead of growing without limit
@@ -352,4 +379,3 @@ https://github.com/user-attachments/assets/5222c9cc-aa4c-468a-b3a6-d0913bf26efe
 #### AI
 
 https://github.com/user-attachments/assets/a383c30c-a40c-4cef-86dc-43a8bcde25b1
-

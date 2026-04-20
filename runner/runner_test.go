@@ -126,6 +126,29 @@ func TestManagerTimeoutMarksFinishedMsg(t *testing.T) {
 	}
 }
 
+func TestManagerStartCommandStreamsOutput(t *testing.T) {
+	manager := New()
+	id := manager.StartCommand(
+		"printf",
+		[]string{"ready"},
+		"",
+		RunOptions{DisableSandbox: true, MaxRuntime: 3 * time.Second},
+	)
+	if id == 0 {
+		t.Fatalf("expected non-zero run id")
+	}
+
+	expectEventType[StartedMsg](t, manager.Events(), 2*time.Second)
+	output := expectEventType[OutputMsg](t, manager.Events(), 2*time.Second)
+	if !strings.Contains(output.Text, "ready") {
+		t.Fatalf("expected ready output, got %q", output.Text)
+	}
+	finished := expectEventType[FinishedMsg](t, manager.Events(), 2*time.Second)
+	if finished.Err != nil {
+		t.Fatalf("expected nil error, got %v", finished.Err)
+	}
+}
+
 func expectEventType[T any](t *testing.T, events <-chan Event, timeout time.Duration) T {
 	t.Helper()
 

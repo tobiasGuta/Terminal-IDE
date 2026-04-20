@@ -29,6 +29,25 @@ func TestCommandPaletteFindActionOpensPrompt(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteInstallActionOpensPrompt(t *testing.T) {
+	m := NewApp().(*appModel)
+	m.width = 120
+	m.height = 40
+	m.resize()
+
+	path := writeTempFile(t, t.TempDir(), "sample.py", "print('hi')\n")
+	if _, err := m.openFile(path); err != nil {
+		t.Fatalf("openFile failed: %v", err)
+	}
+
+	if cmd := m.executeCommandAction("install_package"); cmd != nil {
+		t.Fatalf("expected install_package action not to return a command")
+	}
+	if m.prompt.mode != promptInstallPackage {
+		t.Fatalf("expected prompt mode %v, got %v", promptInstallPackage, m.prompt.mode)
+	}
+}
+
 func TestOpenFileCreatesPerTabRunner(t *testing.T) {
 	m := NewApp().(*appModel)
 	m.width = 120

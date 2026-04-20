@@ -57,6 +57,9 @@ const (
 	promptNone promptMode = iota
 	promptFind
 	promptGoto
+	promptInstallPackage
+	promptInstallVenvConfirm
+	promptInstallVenvName
 )
 
 type promptField struct {
@@ -73,17 +76,18 @@ type inlinePrompt struct {
 }
 
 type editorTab struct {
-	id                int
-	path              string
-	editor            editor.Model
-	output            outputModel
-	runner            *runner.Manager
-	status            string
-	debounceToken     int
-	activeRunID       int
-	pythonInterpreter string
-	hintLevel         int
-	lastHintSource    string
+	id                     int
+	path                   string
+	editor                 editor.Model
+	output                 outputModel
+	runner                 *runner.Manager
+	status                 string
+	debounceToken          int
+	activeRunID            int
+	pythonInterpreter      string
+	hintLevel              int
+	lastHintSource         string
+	missingModuleDismissed bool
 }
 
 type editorLayout struct {
@@ -148,6 +152,20 @@ type appModel struct {
 	layout             editorLayout
 	pythonInterpreters []runner.PythonInterpreter
 	prompt             inlinePrompt
+	installRunner      *runner.Manager
+	installTabID       int
+	installRunID       int
+	installQueue       []installCommand
+	installVenvPath    string
+	installPackage     string
+	activeVenvPath     string
+}
+
+type installCommand struct {
+	command string
+	args    []string
+	dir     string
+	label   string
 }
 
 func NewApp() tea.Model {
@@ -179,6 +197,7 @@ func NewApp() tea.Model {
 		focus:              "editor",
 		gitStatus:          map[string]string{},
 		pythonInterpreters: interpreters,
+		installTabID:       -1,
 	}
 }
 
@@ -196,6 +215,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runnerEventMsg:
 		return m, m.handleRunnerEvent(msg)
+
+	case installRunnerEventMsg:
+		return m, m.handleInstallRunnerEvent(msg)
 
 	case aiStreamMsg:
 		event := msg.event
@@ -359,6 +381,27 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.screen == screenEditor && m.hasActiveTab() && m.prompt.mode == promptNone && !m.tabs[m.activeTab].output.InputFocused() {
+		switch key.String() {
+		case "enter":
+			if module := m.tabs[m.activeTab].output.MissingModulePrompt(); module != "" {
+				m.tabs[m.activeTab].output.ClearMissingModulePrompt()
+				m.tabs[m.activeTab].missingModuleDismissed = false
+				m.installPackage = module
+				m.openInstallVenvPrompt()
+				m.tabs[m.activeTab].status = fmt.Sprintf("Install %q", module)
+				return m, nil
+			}
+		case "esc":
+			if m.tabs[m.activeTab].output.MissingModulePrompt() != "" {
+				m.tabs[m.activeTab].output.ClearMissingModulePrompt()
+				m.tabs[m.activeTab].missingModuleDismissed = true
+				m.tabs[m.activeTab].status = "Missing-module prompt dismissed"
+				return m, nil
+			}
+		}
+	}
+
 	if key.Paste && m.screen == screenEditor && m.hasActiveTab() {
 		text := string(key.Runes)
 		if m.tabs[m.activeTab].output.InputFocused() {
@@ -454,6 +497,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commandPalette.Open(key.String() == "?")
 			m.prevScreen = m.screen
 			m.screen = screenCommandPalette
+			return m, nil
+		}
+	case "ctrl+i":
+		if m.screen == screenEditor && m.hasActiveTab() && !m.tabs[m.activeTab].output.InputFocused() {
+			m.openInstallPackagePrompt("")
 			return m, nil
 		}
 	case "ctrl+e":
@@ -848,6 +896,10 @@ func (m *appModel) closeActiveTab() {
 	if m.tabs[m.activeTab].activeRunID != 0 {
 		m.tabs[m.activeTab].runner.StopRun(m.tabs[m.activeTab].activeRunID)
 	}
+	if m.installTabID == m.tabs[m.activeTab].id && m.installRunner != nil {
+		m.installRunner.Stop()
+		m.clearInstallState()
+	}
 	m.tabs[m.activeTab].runner.Stop()
 
 	m.tabs = append(m.tabs[:m.activeTab], m.tabs[m.activeTab+1:]...)
@@ -874,11 +926,13 @@ func (m *appModel) startRunForTab(index int, status string) tea.Cmd {
 		MaxRuntime: runner.DefaultMaxRuntime,
 	}
 	if strings.EqualFold(filepath.Ext(tab.path), ".py") {
-		opts.PythonInterpreter = tab.pythonInterpreter
+		opts.PythonInterpreter = m.activePythonInterpreter(index)
 	}
 	tab.activeRunID = tab.runner.Start(tab.path, tab.editor.Content(), opts)
 	tab.editor.ClearExecution()
 	tab.output.StartSession(status, m.runCommandLabel(*tab))
+	tab.output.ClearMissingModulePrompt()
+	tab.missingModuleDismissed = false
 	tab.output.ClearInput()
 	tab.output.SetInputFocus(false)
 	tab.status = status
@@ -1098,6 +1152,161 @@ func (m *appModel) defaultCreateDir() string {
 		return filepath.Dir(m.tabs[m.activeTab].path)
 	}
 	return pickerStartPath("")
+}
+
+func (m *appModel) openInstallPackagePrompt(defaultValue string) {
+	initial := strings.TrimSpace(defaultValue)
+	m.installPackage = initial
+	m.installVenvPath = ""
+	m.prompt = inlinePrompt{
+		mode:  promptInstallPackage,
+		title: "Install Package",
+		hint:  "enter confirm • esc cancel",
+		fields: []promptField{
+			{
+				label: "Package name (e.g. requests, or -r requirements.txt)",
+				value: []rune(initial),
+			},
+		},
+	}
+}
+
+func (m *appModel) openInstallVenvPrompt() {
+	m.prompt = inlinePrompt{
+		mode:  promptInstallVenvConfirm,
+		title: "Install Package",
+		hint:  "Run in virtual environment? (y/N)",
+		fields: []promptField{
+			{label: "Choice"},
+		},
+	}
+}
+
+func (m *appModel) openInstallVenvNamePrompt() {
+	m.prompt = inlinePrompt{
+		mode:  promptInstallVenvName,
+		title: "Install Package",
+		hint:  "Virtual env name (default: .venv)",
+		fields: []promptField{
+			{label: "Virtual env", value: []rune(".venv")},
+		},
+	}
+}
+
+func (m *appModel) startPackageInstall(index int, pkg string, useVenv bool, envName string) tea.Cmd {
+	if index < 0 || index >= len(m.tabs) {
+		return nil
+	}
+	if m.installRunID != 0 || len(m.installQueue) > 0 {
+		m.tabs[index].status = "Installation already running"
+		return nil
+	}
+	parts := strings.Fields(strings.TrimSpace(pkg))
+	if len(parts) == 0 {
+		m.tabs[index].status = "Enter a package name"
+		return nil
+	}
+
+	workDir := filepath.Dir(m.tabs[index].path)
+	pythonCmd := m.activePythonInterpreter(index)
+	if pythonCmd == "" {
+		pythonCmd = "python3"
+	}
+
+	var queue []installCommand
+	if useVenv {
+		envName = strings.TrimSpace(envName)
+		if envName == "" {
+			envName = ".venv"
+		}
+		envPath := envName
+		if !filepath.IsAbs(envPath) {
+			envPath = filepath.Join(workDir, envPath)
+		}
+		m.installVenvPath = envPath
+		queue = append(queue, installCommand{
+			command: pythonCmd,
+			args:    []string{"-m", "venv", envName},
+			dir:     workDir,
+			label:   fmt.Sprintf("➜ %s -m venv %s", filepath.Base(pythonCmd), envName),
+		})
+		pipPath := filepath.Join(envPath, "bin", "pip")
+		queue = append(queue, installCommand{
+			command: pipPath,
+			args:    append([]string{"install"}, parts...),
+			dir:     workDir,
+			label:   fmt.Sprintf("➜ %s install %s", pipPath, strings.Join(parts, " ")),
+		})
+	} else {
+		m.installVenvPath = ""
+		queue = append(queue, installCommand{
+			command: pythonCmd,
+			args:    append([]string{"-m", "pip", "install"}, parts...),
+			dir:     workDir,
+			label:   fmt.Sprintf("➜ %s -m pip install %s", filepath.Base(pythonCmd), strings.Join(parts, " ")),
+		})
+	}
+
+	if m.installRunner == nil {
+		m.installRunner = runner.New()
+	}
+	m.installQueue = queue
+	m.installTabID = m.tabs[index].id
+	m.tabs[index].output.StartSession("Installing...", "")
+	m.tabs[index].output.ClearInput()
+	m.tabs[index].output.SetInputFocus(false)
+	m.tabs[index].status = "Installing..."
+	m.focus = "editor"
+	return m.startNextInstallCommand()
+}
+
+func (m *appModel) startNextInstallCommand() tea.Cmd {
+	if len(m.installQueue) == 0 || m.installRunner == nil || m.installTabID < 0 {
+		return nil
+	}
+	idx := m.findTabByID(m.installTabID)
+	if idx < 0 {
+		m.clearInstallState()
+		return nil
+	}
+	step := m.installQueue[0]
+	m.installQueue = m.installQueue[1:]
+	if len(step.label) > 0 {
+		m.tabs[idx].output.Append(step.label+"\n", false)
+	}
+	m.installRunID = m.installRunner.StartCommand(step.command, step.args, step.dir, runner.RunOptions{DisableSandbox: true})
+	m.tabs[idx].output.SetStatus("Installing...")
+	m.tabs[idx].status = "Installing..."
+	return waitForInstallEvent(m.installTabID, m.installRunner)
+}
+
+func (m *appModel) clearInstallState() {
+	m.installRunID = 0
+	m.installTabID = -1
+	m.installQueue = nil
+	m.installVenvPath = ""
+}
+
+func (m *appModel) installVenvLabel() string {
+	if m.activeVenvPath == "" {
+		return ""
+	}
+	return filepath.Base(m.activeVenvPath)
+}
+
+func (m *appModel) activePythonInterpreter(index int) string {
+	if m.activeVenvPath != "" {
+		return filepath.Join(m.activeVenvPath, "bin", "python")
+	}
+	if index >= 0 && index < len(m.tabs) && m.tabs[index].pythonInterpreter != "" {
+		return m.tabs[index].pythonInterpreter
+	}
+	for _, item := range m.pythonInterpreters {
+		if strings.TrimSpace(item.Path) != "" {
+			return item.Path
+		}
+	}
+	return ""
 }
 
 func max(a, b int) int {

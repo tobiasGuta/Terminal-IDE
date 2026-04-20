@@ -96,6 +96,12 @@ func (m *appModel) executeCommandAction(action string) tea.Cmd {
 		m.newFile.SetSize(m.width, m.height)
 		m.pushScreen(m.screen)
 		m.screen = screenNewFile
+	case "install_package":
+		if m.screen == screenEditor && m.hasActiveTab() {
+			m.openInstallPackagePrompt("")
+		} else {
+			m.status = "Open a file tab to install packages for that workspace."
+		}
 	case "close_tab":
 		if m.screen == screenEditor && m.hasActiveTab() {
 			m.closeActiveTab()
@@ -134,6 +140,8 @@ func (m *appModel) executeCommandAction(action string) tea.Cmd {
 	case "quit":
 		m.stopAllRuns()
 		return tea.Quit
+	case "noop":
+		return nil
 	}
 	return nil
 }

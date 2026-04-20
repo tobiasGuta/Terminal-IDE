@@ -21,6 +21,8 @@ type outputModel struct {
 	aiStreaming  bool
 	colOffset    int
 	status       string
+	headerNote   string
+	missingPkg   string
 	inputBuffer  []rune
 	inputFocus   bool
 	selecting    bool
@@ -60,6 +62,7 @@ func (m *outputModel) Reset(status string) {
 	m.pendingErr = false
 	m.colOffset = 0
 	m.status = status
+	m.missingPkg = ""
 	m.ClearSelection()
 }
 
@@ -159,8 +162,24 @@ func (m *outputModel) SetStatus(status string) {
 	m.status = status
 }
 
+func (m *outputModel) SetHeaderNote(note string) {
+	m.headerNote = strings.TrimSpace(note)
+}
+
 func (m outputModel) Status() string {
 	return m.status
+}
+
+func (m *outputModel) SetMissingModulePrompt(module string) {
+	m.missingPkg = strings.TrimSpace(module)
+}
+
+func (m *outputModel) ClearMissingModulePrompt() {
+	m.missingPkg = ""
+}
+
+func (m outputModel) MissingModulePrompt() string {
+	return m.missingPkg
 }
 
 func (m *outputModel) SetInputFocus(focused bool) {
@@ -312,7 +331,11 @@ func (m *outputModel) SelectedText() string {
 
 func (m outputModel) View() string {
 	var body []string
-	body = append(body, accentStyle.Render("Live Output")+"  "+mutedStyle.Render(m.status))
+	header := accentStyle.Render("Live Output")
+	if m.headerNote != "" {
+		header += "  " + mutedStyle.Render("["+m.headerNote+"]")
+	}
+	body = append(body, header+"  "+mutedStyle.Render(m.status))
 
 	visibleLines, start := m.visibleOutputLines()
 	for i, line := range visibleLines {
@@ -330,6 +353,11 @@ func (m outputModel) View() string {
 			style = accentStyle
 		}
 		body = append(body, style.Render(activeInput))
+	}
+
+	if m.missingPkg != "" {
+		warning := lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+		body = append(body, warning.Render("⚠ Missing module '"+m.missingPkg+"' — press Enter to install, Esc to dismiss"))
 	}
 
 	return strings.Join(body, "\n")
